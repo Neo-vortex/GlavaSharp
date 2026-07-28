@@ -228,8 +228,7 @@ where memory-safety bugs live. Instead:
   given frame produces fewer new samples than the FFT window needs.
 - Built as `crate-type = ["staticlib"]` and statically linked into the
   final Native AOT executable via `<NativeLibrary>` +
-  `<DirectPInvoke Include="pwshim"/>` in the `.csproj` — the shipped
-  artifact is one file, no sibling `libpwshim.so` to lose track of.
+  `<DirectPInvoke Include="pwshim"/>` in the `.csproj`
 
 ### FFT (`Shaders/CpuFft.cs`, `Shaders/GpuFft.cs`)
 
@@ -376,8 +375,7 @@ directive surface (window decoration/floating/opacity hints, geometry,
   start/stop/list/read, nothing else — specifically so this trade stays
   worth it rather than becoming "half the app is now in Rust."
 - **Native AOT + static linking instead of a dynamically linked
-  executable.** Produces one self-contained binary with no sibling `.so`
-  and no shared shader/config install step (yet), at the cost of AOT's
+  executable.** Produces  self-contained binary and no shared shader/config install step (yet), at the cost of AOT's
   usual constraints (no runtime codegen, trimming-sensitive reflection —
   hence `EnableTrimAnalyzer`/`EnableAotAnalyzer` as build errors, not
   warnings, in the `.csproj`) and a build pipeline that requires both the
