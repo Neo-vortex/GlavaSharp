@@ -410,9 +410,9 @@ See the top of `src/GlavaSharp/Program.cs` for the full CLI flag reference
 
 ## License
 
-No license has been chosen yet for this repository — add a `LICENSE` file
-before treating this as open source in any legal sense. The bundled shader
-tree under `src/GlavaSharp/shaders/glava/` originates from
-[GLava](https://github.com/jarcode-foss/glava); refer to that project's
-license for terms covering those files specifically, independent of
-whatever license you choose for the rest of this repo.
+This project is licensed under the MIT License. See the `LICENSE` file for the
+full license text.
+
+The bundled shader tree under `src/GlavaSharp/shaders/glava/` originates from
+GLava and remains subject to its own license. See the original GLava project
+for the licensing terms that apply to those files.
