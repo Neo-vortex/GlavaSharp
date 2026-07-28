@@ -1,0 +1,21 @@
+[package]
+name = "pwshim"
+version = "0.1.0"
+edition = "2021"
+
+# staticlib (not cdylib): Native AOT statically links this .a directly
+# into the final executable via <NativeLibrary>/<DirectPInvoke> in the
+# csproj, so there's no separate libpwshim.so to ship alongside the exe.
+[lib]
+name = "pwshim"
+crate-type = ["staticlib"]
+
+[dependencies]
+# Verify this resolves to the latest 0.8.x on your machine — pipewire-rs's
+# stream/pod API has moved between minor versions.
+pipewire = "0.8"
+libc = "0.2"
+
+[profile.release]
+opt-level = 2
+panic = "abort"

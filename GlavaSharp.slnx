@@ -1,0 +1,5 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/GlavaSharp/GlavaSharp.csproj" />
+  </Folder>
+</Solution>

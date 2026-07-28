@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # --------------------------------------------------------------------
+  # Rust: build + test the pwshim crate in isolation (native/pwshim/).
+  # This does NOT need the .NET SDK at all -- it's a standalone crate.
+  # --------------------------------------------------------------------
+  rust:
+    name: Rust (pwshim)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/pwshim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (PipeWire dev headers + clang for bindgen)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpipewire-0.3-dev pkg-config clang libclang-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry/target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/pwshim/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/pwshim/Cargo.lock') }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+        continue-on-error: true # style-only; don't fail the build over it yet
+
+      - name: cargo clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+        continue-on-error: true # tighten this once the crate is past early-alpha
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: cargo test
+        run: cargo test --release
+
+      - name: Upload libpwshim.a
+        uses: actions/upload-artifact@v4
+        with:
+          name: libpwshim-a
+          path: native/pwshim/target/release/libpwshim.a
+
+  # --------------------------------------------------------------------
+  # .NET: build + test the GlavaSharp project on its own. Deliberately
+  # plain `dotnet build` (PublishAot is NOT set here), so this job does
+  # NOT need the Rust static lib -- <NativeLibrary>/<DirectPInvoke> in the
+  # csproj are gated behind `Condition="'$(PublishAot)' == 'true'"`, so a
+  # normal build/test loop stays fast and independent of the Rust side.
+  # --------------------------------------------------------------------
+  dotnet:
+    name: .NET (GlavaSharp)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: dotnet restore
+        run: dotnet restore GlavaSharp.slnx
+
+      - name: dotnet build
+        run: dotnet build GlavaSharp.slnx -c Release --no-restore
+
+      - name: dotnet test
+        # No *.Tests.csproj exists yet (early alpha) -- this is here so CI
+        # picks up test projects automatically the moment one is added,
+        # with no workflow changes required.
+        run: dotnet test GlavaSharp.slnx -c Release --no-build
+
+  # --------------------------------------------------------------------
+  # Integration: the actual end-to-end pipeline a user/CI release job
+  # would run -- build the Rust shim, then dotnet publish with
+  # PublishAot=true, statically linking it in, via the same CMake flow
+  # documented in the README. Confirms the two sides actually link
+  # together, not just that each compiles alone.
+  # --------------------------------------------------------------------
+  native-aot-integration:
+    name: Native AOT integration build (CMake)
+    runs-on: ubuntu-latest
+    needs: [ rust, dotnet ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libpipewire-0.3-dev pkg-config clang libclang-dev cmake
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache cargo registry/target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/pwshim/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/pwshim/Cargo.lock') }}
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      - name: Build (Rust shim -> Native AOT publish, statically linked)
+        run: cmake --build build
+
+      - name: Verify the published binary exists and runs --list-gpus
+        run: |
+          ./build/dist/GlavaSharp --list-gpus
+
+      - name: Upload published binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: GlavaSharp-linux-x64
+          path: build/dist/GlavaSharp

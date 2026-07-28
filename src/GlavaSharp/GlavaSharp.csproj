@@ -1,0 +1,54 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <RootNamespace>GlavaSharp</RootNamespace>
+
+        <!-- Native AOT -->
+        <PublishAot>true</PublishAot>
+        <InvariantGlobalization>true</InvariantGlobalization>
+        <EventSourceSupport>false</EventSourceSupport>
+        <HttpActivityPropagationSupport>false</HttpActivityPropagationSupport>
+        <UseSystemResourceKeys>true</UseSystemResourceKeys>
+
+        <!-- AOT diagnostics: fail loudly on trimming/AOT-unfriendly code paths -->
+        <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+        <EnableAotAnalyzer>true</EnableAotAnalyzer>
+        <WarningsAsErrors>IL2026;IL2075;IL3050</WarningsAsErrors>
+
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- GLFW-backed windowing/input/GL loader. Pin explicitly: Wayland support
+             depends on the bundled native GLFW build, not just the OpenTK version. -->
+        <PackageReference Include="OpenTK" Version="4.9.3"/>
+        <PackageReference Include="OpenTK.Windowing.GraphicsLibraryFramework" Version="4.9.3"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Content Include="assets/**/*" CopyToOutputDirectory="PreserveNewest" Condition="Exists('assets')"/>
+        <!-- Bundled GLava shader tree (rc.glsl + bars/circle/radial/graph/wave
+             modules + util/*.glsl). AppWindow resolves this at
+             AppContext.BaseDirectory/shaders/glava unless  overrides it. -->
+        <Content Include="shaders/**/*" CopyToOutputDirectory="PreserveNewest"/>
+    </ItemGroup>
+
+    <!-- Statically link the Rust pwshim staticlib (../../native/pwshim/) into
+         the AOT executable, so the final output is a single file with no
+         sibling libpwshim.so. DirectPInvoke tells ILC to bind
+         pwshim_start/pwshim_stop at compile time instead of resolving them
+         via dlopen at runtime. Built by CMake before dotnet publish runs;
+         see native/pwshim/Cargo.toml. -->
+    <ItemGroup Condition="'$(PublishAot)' == 'true'">
+        <DirectPInvoke Include="pwshim"/>
+        <NativeLibrary Include="$(MSBuildThisFileDirectory)../../native/pwshim/target/release/libpwshim.a"/>
+        <!-- The Rust staticlib calls into libpipewire-0.3.so but doesn't embed
+             it (it's a shared system library, same as libc) — ILC's generated
+             link command needs telling explicitly to link against it. -->
+        <LinkerArg Include="-lpipewire-0.3"/>
+    </ItemGroup>
+</Project>
