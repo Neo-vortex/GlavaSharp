@@ -235,7 +235,6 @@ public sealed class ShaderModule : IDisposable
         var fullFrag = "#version 430 core\n" + fragSource;
         var fs = GL.CreateShader(ShaderType.FragmentShader);
         GL.ShaderSource(fs, fullFrag);
-        Console.WriteLine($"[GlavaSharp]   compiling fragment shader (source below) ...\n{fullFrag}");
         GL.CompileShader(fs);
         Console.WriteLine("[GlavaSharp]   fragment shader glCompileShader() returned");
         GL.GetShader(fs, ShaderParameter.CompileStatus, out var fsOk);

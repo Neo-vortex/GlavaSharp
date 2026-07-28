@@ -4,35 +4,37 @@ using OpenTK.Graphics.OpenGL;
 namespace GlavaSharp.Shaders;
 
 /// <summary>
-///     GLSL 4.3 compute-shader FFT. Same architectural spot GLava's own
-///     fft_radix*.glsl compute kernels occupy (GPU does the transform, CPU
-///     just feeds windowed PCM in and reads magnitude bins back out) — this
-///     is a from-scratch single-workgroup radix-2 Cooley-Tukey implementation
-///     rather than a port of GLava's templated radix-4/8/16/64 kernels, which
-///     depend on GLava's own C preprocessor harness to generate. N must be a
-///     power of two (default 2048, matching the probe buffer already in
-///     Program.cs) and &lt;= 2048 so one workgroup (local_size_x = N/2) covers
-///     the whole transform in shared memory without ping-ponging buffers.
+///     GLSL 4.3 compute-shader FFT, selected via <c>--fft-device gpu</c> (see
+///     <see cref="FftSettings.Device" />). Rewritten from scratch to be a
+///     bit-for-bit-equivalent GPU port of <see cref="CpuFft" />: same Hann
+///     window, same bit-reversal permutation, same iterative radix-2
+///     Cooley-Tukey stage loop, same Hann-gain-corrected normalization, same
+///     log-compression formula, and the same attack/decay/gain knobs pulled
+///     from <see cref="FftSettings" /> instead of being hardcoded. Only the
+///     windowing/bit-reversal (trivial, memory-bound) and the gravity
+///     smoothing (inherently serial across frames, one value per bin) stay on
+///     the CPU; the O(N log N) butterfly work happens on the GPU.
+///     Single-workgroup (local_size_x = N/2), so the whole transform lives in
+///     `shared` memory without ping-ponging buffers -- this caps N at 2048
+///     (same limit <c>CpuFft</c> doesn't have, since it's not workgroup-bound,
+///     but which matches the shared default of <see cref="FftSettings.Size" />).
 /// </summary>
-public sealed class GpuFft : IDisposable
+public sealed class GpuFft : IFft
 {
-    // Gravity: rises fast (attack), falls slowly (decay) — same feel as
-    // GLava's util/gravity_pass.frag.
-    private const float Attack = 0.6f;
-    private const float Decay = 0.08f;
-
-    // Plain (non-interpolated) raw string + token substitution instead of
-    // a $$"""...""" interpolated raw string: GLSL is brace-heavy and
-    // relying on C#'s "N dollars => N braces starts interpolation" rule
-    // next to hand-written GLSL braces is easy to get subtly wrong. Token
-    // substitution keeps the GLSL body untouched by C# string-literal
-    // escaping rules entirely.
+    // Token substitution instead of a $$"""...""" interpolated raw string:
+    // GLSL is brace-heavy and relying on C#'s "N dollars => N braces starts
+    // interpolation" rule next to hand-written GLSL braces is easy to get
+    // subtly wrong. Token substitution keeps the GLSL body untouched by C#
+    // string-literal escaping rules entirely.
     private const string SourceTemplate = """
                                           #version 430
                                           layout(local_size_x = __HALF__) in;
 
-                                          layout(std430, binding = 0) buffer InL { vec2 dataL[]; };
-                                          layout(std430, binding = 1) buffer InR { vec2 dataR[]; };
+                                          // Windowed, bit-reversed time-domain samples, precomputed on the CPU
+                                          // (same _hann/_bitRev tables as CpuFft) so the shader only has to do
+                                          // the butterfly stages, not windowing or bit-reversal.
+                                          layout(std430, binding = 0) buffer InL { float inL[]; };
+                                          layout(std430, binding = 1) buffer InR { float inR[]; };
                                           layout(std430, binding = 2) buffer OutL { float outL[]; };
                                           layout(std430, binding = 3) buffer OutR { float outR[]; };
 
@@ -43,29 +45,40 @@ public sealed class GpuFft : IDisposable
                                           const uint N = __N__u;
                                           const uint HALF = __HALF__u;
 
-                                          // Deliberately a uniform, not a compile-time const: with LOGN baked
-                                          // in as a literal, Mesa's compute-shader compiler (iris/NIR on
-                                          // Intel) tries to fully unroll this loop and do scalar replacement
-                                          // on the two __N__-element `shared` arrays below, since every index
-                                          // into them (bitReverse(tid), j, j+half_) is a per-invocation
-                                          // runtime value rather than a constant. That combination can make
-                                          // glCompileShader/glLinkProgram hang or take minutes on real
-                                          // hardware with no error reported. Keeping LOGN as a uniform forces
-                                          // the driver to keep this as a real loop instead.
+                                          // Deliberately uniforms, not compile-time consts: with LOGN baked in
+                                          // as a literal, Mesa's compute-shader compiler (iris/NIR on Intel)
+                                          // tries to fully unroll the stage loop and do scalar replacement on
+                                          // the two __N__-element `shared` arrays below, since every index into
+                                          // them is a per-invocation runtime value rather than a constant. That
+                                          // combination can make glCompileShader/glLinkProgram hang or take
+                                          // minutes on real hardware with no error reported. Keeping LOGN (and
+                                          // the tunables below) as uniforms forces the driver to keep this as a
+                                          // real loop instead.
                                           uniform uint u_logN;
-
-                                          uint bitReverse(uint x) {
-                                              uint r = 0u;
-                                              for (uint i = 0u; i < u_logN; i++) {
-                                                  r = (r << 1) | (x & 1u);
-                                                  x >>= 1;
-                                              }
-                                              return r;
-                                          }
+                                          uniform float u_normFactor; // 2 / (N * hannWindowGain), matches CpuFft
+                                          uniform float u_gain;       // FftSettings.Gain (log-compression contrast)
 
                                           vec2 cmul(vec2 a, vec2 b) { return vec2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); }
 
-                                          void fftStage(uint tid, inout vec2 sh[__N__]) {
+                                          void main() {
+                                              uint tid = gl_LocalInvocationID.x; // 0 .. HALF-1
+
+                                              // inL/inR already windowed + bit-reversed on the CPU; imaginary
+                                              // part starts at zero, same as CpuFft's _imL/_imR.
+                                              shL[tid] = vec2(inL[tid], 0.0);
+                                              shL[tid + HALF] = vec2(inL[tid + HALF], 0.0);
+                                              shR[tid] = vec2(inR[tid], 0.0);
+                                              shR[tid + HALF] = vec2(inR[tid + HALF], 0.0);
+                                              barrier();
+
+                                              // In-place iterative DIT FFT, identical stage structure to
+                                              // CpuFft.Transform: for each of log2(N) stages, pair up elements
+                                              // `half` apart within blocks of `size`, apply the twiddle factor
+                                              // for this stage/position, and butterfly. Both channels share the
+                                              // same j/twiddle math, so they're done together in one loop --
+                                              // shL/shR are referenced directly (not passed through a function
+                                              // call) since `shared` arrays can't safely cross a GLSL function
+                                              // boundary by value/inout.
                                               for (uint stage = 0u; stage < u_logN; stage++) {
                                                   uint m = 1u << (stage + 1u);
                                                   uint half_ = m >> 1;
@@ -73,59 +86,91 @@ public sealed class GpuFft : IDisposable
                                                   uint j = (tid / half_) * m + k;
                                                   float angle = -2.0 * PI * float(k) / float(m);
                                                   vec2 w = vec2(cos(angle), sin(angle));
-                                                  vec2 a = sh[j];
-                                                  vec2 b = cmul(w, sh[j + half_]);
+
+                                                  vec2 aL = shL[j];
+                                                  vec2 bL = cmul(w, shL[j + half_]);
+                                                  vec2 aR = shR[j];
+                                                  vec2 bR = cmul(w, shR[j + half_]);
                                                   barrier();
-                                                  sh[j] = a + b;
-                                                  sh[j + half_] = a - b;
+                                                  shL[j] = aL + bL;
+                                                  shL[j + half_] = aL - bL;
+                                                  shR[j] = aR + bR;
+                                                  shR[j + half_] = aR - bR;
                                                   barrier();
                                               }
-                                          }
 
-                                          void main() {
-                                              uint tid = gl_LocalInvocationID.x; // 0 .. HALF-1
-
-                                              shL[bitReverse(tid)] = dataL[tid];
-                                              shL[bitReverse(tid + HALF)] = dataL[tid + HALF];
-                                              shR[bitReverse(tid)] = dataR[tid];
-                                              shR[bitReverse(tid + HALF)] = dataR[tid + HALF];
-                                              barrier();
-
-                                              fftStage(tid, shL);
-                                              fftStage(tid, shR);
-
-                                              // Log-compressed magnitude, roughly [0,1]. Mirrors the shape of
-                                              // GLava's scale_audio() (util/smooth.glsl) without importing its
-                                              // exact SAMPLE_RANGE/SAMPLE_SCALE constants.
-                                              float magL = length(shL[tid]) / float(N);
-                                              float magR = length(shR[tid]) / float(N);
-                                              const float K = 40.0;
-                                              outL[tid] = clamp(log(1.0 + magL * K) / log(1.0 + K), 0.0, 1.0);
-                                              outR[tid] = clamp(log(1.0 + magR * K) / log(1.0 + K), 0.0, 1.0);
+                                              // Only the first N/2 bins (single-sided spectrum) are meaningful;
+                                              // this workgroup has exactly HALF=N/2 invocations, so every
+                                              // invocation writes exactly one output bin -- same magnitude/log
+                                              // -compression formula as CpuFft.Process:
+                                              //   norm = 2 / (N * windowGain)
+                                              //   out  = clamp(log(1 + mag*gain) / log(1 + gain), 0, 1)
+                                              float magL = length(shL[tid]) * u_normFactor;
+                                              float magR = length(shR[tid]) * u_normFactor;
+                                              outL[tid] = clamp(log(1.0 + magL * u_gain) / log(1.0 + u_gain), 0.0, 1.0);
+                                              outR[tid] = clamp(log(1.0 + magR * u_gain) / log(1.0 + u_gain), 0.0, 1.0);
                                           }
                                           """;
 
-    private readonly float[] _cpuInL, _cpuInR; // interleaved re,im=0
+    // Same gravity smoothing as CpuFft.ApplyGravity, and sourced from the
+    // same FftSettings (rather than hardcoded) so `--fft-attack`/`--fft-decay`
+    // behave identically regardless of which backend is active.
+    private readonly float _attack;
+    private readonly float _decay;
+    private readonly float _gain;
+
+    private readonly int[] _bitRev;
     private readonly float[] _hann;
-    private readonly int _logNLoc;
+    private readonly float _windowGain;
+
+    private readonly float[] _cpuInL, _cpuInR; // windowed + bit-reversed, real-valued (imag part is implicit 0)
+    private readonly float[] _rawOutL, _rawOutR;
+    private readonly float[] _smoothL, _smoothR; // gravity-smoothed, CPU-side (inherently serial across frames)
 
     private readonly int _program;
-    private readonly float[] _rawOutL, _rawOutR;
-    private readonly float[] _smoothL, _smoothR; // gravity-smoothed, CPU-side (mirrors glava's gravity/avg transforms)
+    private readonly int _logNLoc, _normFactorLoc, _gainLoc;
     private readonly int _ssboInL, _ssboInR, _ssboOutL, _ssboOutR;
 
-    public GpuFft(int n = 2048)
+    public GpuFft(FftSettings? settings = null)
     {
-        if ((n & (n - 1)) != 0) throw new ArgumentException("N must be a power of two", nameof(n));
-        if (n > 2048) throw new ArgumentException("N must be <= 2048 (single-workgroup limit)", nameof(n));
+        settings ??= new FftSettings();
+        var n = settings.Size;
+        if ((n & (n - 1)) != 0) throw new ArgumentException("Size must be a power of two", nameof(settings));
+        if (n > 2048) throw new ArgumentException("Size must be <= 2048 (single-workgroup limit)", nameof(settings));
         N = n;
+        _attack = settings.Attack;
+        _decay = settings.Decay;
+        _gain = settings.Gain;
 
+        // --- Same precomputation as CpuFft: Hann window (+ its mean, for
+        // --- normalization), and the bit-reversal permutation table. No
+        // --- twiddle table needed here -- the shader computes cos/sin
+        // --- per-invocation, same as the CPU version could but doesn't
+        // --- (CPU precomputes for speed; on the GPU, HALF invocations run
+        // --- the trig in parallel so it's cheap either way).
         _hann = new float[N];
         for (var i = 0; i < N; i++)
             _hann[i] = 0.5f - 0.5f * MathF.Cos(2f * MathF.PI * i / (N - 1));
+        var sum = 0f;
+        for (var i = 0; i < N; i++) sum += _hann[i];
+        _windowGain = sum / N; // ~0.5 for Hann, matches CpuFft._windowGain
 
-        _cpuInL = new float[N * 2];
-        _cpuInR = new float[N * 2];
+        var logN = (int)Math.Log2(N);
+        _bitRev = new int[N];
+        for (var i = 0; i < N; i++)
+        {
+            int r = 0, x = i;
+            for (var b = 0; b < logN; b++)
+            {
+                r = (r << 1) | (x & 1);
+                x >>= 1;
+            }
+
+            _bitRev[i] = r;
+        }
+
+        _cpuInL = new float[N];
+        _cpuInR = new float[N];
         _rawOutL = new float[Bins];
         _rawOutR = new float[Bins];
         _smoothL = new float[Bins];
@@ -133,8 +178,18 @@ public sealed class GpuFft : IDisposable
 
         _program = CompileCompute(BuildSource(N));
         _logNLoc = GL.GetUniformLocation(_program, "u_logN");
+        _normFactorLoc = GL.GetUniformLocation(_program, "u_normFactor");
+        _gainLoc = GL.GetUniformLocation(_program, "u_gain");
         GL.UseProgram(_program);
-        GL.Uniform1(_logNLoc, (int)Math.Log2(N));
+        GL.Uniform1(_logNLoc, (uint)logN); // u_logN is `uniform uint` in GLSL -- must go through the
+                                            // glUniform1ui overload, not glUniform1i. Passing the plain
+                                            // `int` here binds the wrong entry point; on strict drivers
+                                            // the uniform is left at its default 0, so the stage loop
+                                            // (`for (uint stage = 0u; stage < u_logN; ...)`) never runs
+                                            // and the shader just reports the magnitude of the raw
+                                            // windowed time-domain samples instead of a real spectrum.
+        GL.Uniform1(_normFactorLoc, 2f / (N * _windowGain)); // matches CpuFft.Process's `norm`
+        GL.Uniform1(_gainLoc, _gain);
 
         _ssboInL = GL.GenBuffer();
         _ssboInR = GL.GenBuffer();
@@ -156,8 +211,8 @@ public sealed class GpuFft : IDisposable
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, 0);
     }
 
-    private int N { get; }
-    private int Bins => N / 2;
+    public int N { get; }
+    public int Bins => N / 2;
 
     public void Dispose()
     {
@@ -172,6 +227,8 @@ public sealed class GpuFft : IDisposable
     ///     Runs one FFT for interleaved stereo PCM (length &gt;= N*2), windows
     ///     it, dispatches the compute shader, and returns smoothed magnitude
     ///     spectra (length Bins each, values roughly in [0,1]) for left/right.
+    ///     Same contract, same output values (up to floating point evaluation
+    ///     order) as <see cref="CpuFft.Process" />.
     /// </summary>
     public (float[] left, float[] right) Process(ReadOnlySpan<float> interleavedStereo)
     {
@@ -184,8 +241,9 @@ public sealed class GpuFft : IDisposable
         for (var i = 0; i < take; i++)
         {
             var w = _hann[N - take + i];
-            _cpuInL[2 * (N - take + i)] = interleavedStereo[2 * (offset + i)] * w;
-            _cpuInR[2 * (N - take + i)] = interleavedStereo[2 * (offset + i) + 1] * w;
+            var dst = _bitRev[N - take + i];
+            _cpuInL[dst] = interleavedStereo[2 * (offset + i)] * w;
+            _cpuInR[dst] = interleavedStereo[2 * (offset + i) + 1] * w;
         }
 
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, _ssboInL);
@@ -212,11 +270,11 @@ public sealed class GpuFft : IDisposable
         return (_smoothL, _smoothR);
     }
 
-    private static void ApplyGravity(float[] raw, float[] smoothed)
+    private void ApplyGravity(float[] raw, float[] smoothed)
     {
         for (var i = 0; i < raw.Length; i++)
         {
-            var rate = raw[i] > smoothed[i] ? Attack : Decay;
+            var rate = raw[i] > smoothed[i] ? _attack : _decay;
             smoothed[i] += (raw[i] - smoothed[i]) * rate;
         }
     }

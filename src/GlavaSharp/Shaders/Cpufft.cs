@@ -3,19 +3,16 @@ using System;
 namespace GlavaSharp.Shaders;
 
 /// <summary>
-///     Iterative radix-2 Cooley-Tukey FFT, CPU-side. Temporary stand-in for the
-///     GPU compute-shader version (<c>GpuFft</c>, kept in the repo but currently
-///     unused): that shader hangs glCompileShader/glLinkProgram on Mesa/Intel
-///     (iris/NIR trying to fully unroll+SROA a large dynamically-indexed
-///     `shared` array — see GpuFft.cs comments). Same public surface (N, Bins,
-///     Process) so <see cref="Windowing.AppWindow" /> doesn't need to change
-///     beyond the type name. Swap back to GpuFft once the driver-side issue is
-///     sorted, or once we verify the uniform-LOGN fix actually resolves it on
-///     real hardware. Size/gravity/gain are configured via <see cref="FftSettings" />
-///     (see Program.cs for the CLI flags and <see cref="RcConfig" /> for the
-///     rc.glsl-derived defaults).
+///     Iterative radix-2 Cooley-Tukey FFT, CPU-side. Default backend selected
+///     via <see cref="FftSettings.Device" /> (<c>--fft-device cpu</c>, the
+///     default) -- see <c>GpuFft</c> for the compute-shader backend that
+///     implements the exact same math on the GPU. Implements <see cref="IFft" />
+///     so <see cref="Windowing.AppWindow" /> can swap backends without caring
+///     which one it got. Size/gravity/gain are configured via
+///     <see cref="FftSettings" /> (see Program.cs for the CLI flags and
+///     <see cref="RcConfig" /> for the rc.glsl-derived defaults).
 /// </summary>
-public sealed class CpuFft : IDisposable
+public sealed class CpuFft : IFft
 {
     // Gravity: rises fast (attack), falls slowly (decay) — same feel as
     // GLava's util/gravity_pass.frag. Sourced from FftSettings so the CLI

@@ -30,7 +30,8 @@ about a broken module.
   - [High-level pipeline](#high-level-pipeline)
   - [Project layout](#project-layout)
   - [Audio capture (`Audio/` + `native/pwshim/`)](#audio-capture-audio--nativepwshim)
-  - [FFT (`Shaders/Cpufft.cs`, `Shaders/GpuFft.cs`)](#fft-shaderscpufftcs-shadersgpufftcs)
+  - [FFT (`Shaders/CpuFft.cs`, `Shaders/GpuFft.cs`)](#fft-shaderscpufftcs-shadersgpufftcs)
+  - [GPU selection (`GpuEnumerator.cs`)](#gpu-selection-gpuenumeratorcs)
   - [Shader preprocessing (`Shaders/GlavaPreprocessor.cs`)](#shader-preprocessing-shadersglavapreprocessorcs)
   - [Shader module pipeline (`Shaders/ShaderModule.cs`)](#shader-module-pipeline-shadersshadermodulecs)
   - [Windowing (`Windowing/AppWindow.cs`)](#windowing-windowingappwindowcs)
@@ -75,7 +76,8 @@ essentially unmodified.
 | Display server support | **X11 only** | **X11 and Wayland** (GLFW's `PlatformPreference.Any` picks whichever the session is running) |
 | Audio backend | PulseAudio (libpulse), linked into the main process | PipeWire, isolated in a separate Rust static library behind a tiny FFI shim |
 | Shader preprocessor | Full custom C preprocessor (`#request`, `#include`, `#expand`, `@fg:`/`@bg:` compositing, GLava's transform pipeline for FFT/window/gravity/avg as *chained shaders*) | A deliberately small subset (see [below](#shader-preprocessing-shadersglavapreprocessorcs)) — enough to load real GLava module files, not a full reimplementation of every directive |
-| FFT | Runs as GLava's own chained compute-shader "transform" passes (`window` → `fft` → `gravity` → `avg`) on the GPU | CPU-side FFT today (`CpuFft`); a GPU compute-shader FFT exists (`GpuFft`) but is currently disabled — see [Status](#status--known-issues) |
+| FFT | Runs as GLava's own chained compute-shader "transform" passes (`window` → `fft` → `gravity` → `avg`) on the GPU | Two interchangeable backends, selected with `--fft-device`: a CPU FFT (`CpuFft`, the default) and a single-workgroup GLSL compute-shader FFT (`GpuFft`) that's bit-for-bit equivalent to it — see [FFT](#fft-shaderscpufftcs-shadersgpufftcs) |
+| GPU selection | N/A | `--list-gpus` enumerates DRM render nodes; `--gpu <index>` pins rendering to one — see [GPU selection](#gpu-selection-gpuenumeratorcs) |
 | Distributable artifact | Dynamically linked binary + installed shader/config tree under `/etc/xdg` or `~/.config/glava` | Single self-contained Native AOT executable with the Rust audio shim statically linked in; shader tree ships alongside it, not installed system-wide (yet) |
 | Desktop-embedded mode (`glava -d` / `setxwintype "desktop"`) | Supported, X11 EWMH-based | **Not yet implemented** — planned, GNOME first (see [Roadmap](#roadmap)) |
 | Module maturity | All bundled modules (bars, radial, circle, graph, wave, ...) are production-quality | Only `bars` and `radial` are verified working; `circle`, `graph`, and `wave` render but have known bugs (see [Status](#status--known-issues)) |
@@ -99,16 +101,28 @@ This is **early alpha** software.
   `#request`/compositing behavior that isn't implemented (see
   [Shader preprocessing](#shader-preprocessing-shadersglavapreprocessorcs)).
   Treat them as "known incomplete," not "regressions to report."
-- **`GpuFft` is present but unused.** The GPU compute-shader FFT
+- **`GpuFft` is implemented and working.** The GPU compute-shader FFT
   (`Shaders/GpuFft.cs`) is a complete, from-scratch radix-2 Cooley-Tukey
   implementation, architecturally in the same spot GLava's own
-  `fft_radix*.glsl` compute kernels occupy. It's disabled today because it
-  can hang `glCompileShader`/`glLinkProgram` on at least one real driver
-  stack (Mesa/Intel iris) with no error reported — see the extensive
-  comment at the top of `GpuFft.cs` for the specific NIR-unrolling theory.
-  `CpuFft` is the stand-in until that's root-caused and fixed (or worked
-  around) on real hardware; re-enabling GPU FFT is on the
-  [roadmap](#roadmap).
+  `fft_radix*.glsl` compute kernels occupy, and produces the same spectrum
+  as `CpuFft` (windowing, bit-reversal, twiddle math, and log-compressed
+  normalization all match). Two driver-level issues surfaced during
+  bring-up and are now worked around/fixed:
+  - `glCompileShader`/`glLinkProgram` could hang on at least one real
+    driver stack (Mesa/Intel iris) with no error reported when `LOGN` was
+    baked in as a compile-time constant, since the driver's NIR unroller
+    would try to fully unroll the stage loop and scalar-replace the
+    per-invocation `shared` arrays. Keeping `LOGN` (and the other tunables)
+    as a `uniform` instead of a constant avoids this.
+  - The `u_logN` uniform is declared `uint` in GLSL but was being uploaded
+    with the signed-int GL entry point (`glUniform1i` instead of
+    `glUniform1ui`); on drivers that enforce the spec's type-matching rule
+    this left the uniform at `0`, silently skipping every FFT stage and
+    producing time-domain noise instead of a spectrum. Fixed by uploading
+    it through the correct unsigned overload.
+    `CpuFft` remains the default backend (`--fft-device cpu`); pass
+    `--fft-device gpu` to use `GpuFft` instead. See
+    [FFT](#fft-shaderscpufftcs-shadersgpufftcs) below.
 - **No desktop-embedded mode.** GLava's `-d` flag / `setxwintype "desktop"`
   behavior (rendering pinned behind desktop icons, EWMH-managed) has no
   equivalent yet.
@@ -131,10 +145,10 @@ running.
    PipeWireAudioSource (Audio/)  ──▶  RingBuffer  ──▶  AudioWindow (tail buffer)
                                                               │
                                                               ▼
-                                                   CpuFft.Process() (Shaders/)
-                                              windowed FFT → log-compressed,
-                                              gravity-smoothed magnitude spectra
-                                                       (left, right)
+                                           IFft.Process() (Shaders/CpuFft.cs or GpuFft.cs,
+                                              per --fft-device) windowed FFT →
+                                              log-compressed, gravity-smoothed
+                                                magnitude spectra (left, right)
                                                               │
                                                               ▼
                                       AudioSpectrumTexture × 2 (1D R32F textures)
@@ -217,24 +231,52 @@ where memory-safety bugs live. Instead:
   `<DirectPInvoke Include="pwshim"/>` in the `.csproj` — the shipped
   artifact is one file, no sibling `libpwshim.so` to lose track of.
 
-### FFT (`Shaders/Cpufft.cs`, `Shaders/GpuFft.cs`)
+### FFT (`Shaders/CpuFft.cs`, `Shaders/GpuFft.cs`)
+
+Both FFT backends implement the same `IFft` interface and are
+interchangeable at runtime via `--fft-device {cpu,gpu}` (`FftSettings.Device`);
+`AppWindow` doesn't care which one it got.
 
 `CpuFft` is an iterative radix-2 Cooley-Tukey FFT with precomputed
 bit-reversal and twiddle-factor tables, a Hann window, and gravity
 smoothing (fast attack, slow decay — the same feel as GLava's
 `util/gravity_pass.frag`). It runs entirely on the CPU and uploads the
-resulting spectra as textures every frame.
+resulting spectra as textures every frame. It's the default backend.
 
 `GpuFft` is the "real" architectural target: a single-workgroup GLSL 4.3
 compute shader doing the same radix-2 transform on the GPU, matching the
 spot GLava's own `fft_radix*.glsl` kernels occupy, so the CPU only feeds
-windowed PCM in via SSBOs and reads magnitude bins back out. It's currently
-unused (see [Status](#status--known-issues)) because of a driver-level
-shader-compiler hang; the class is kept in the tree, with the discovered
-workaround (keep `LOGN` as a `uniform` rather than baking it in as a
-compile-time constant, since the constant-bound version made the crash far
-more reliably reproducible) documented in comments, as a starting point
-for whoever picks this back up.
+windowed PCM in via SSBOs and reads magnitude bins back out. It's a
+bit-for-bit-equivalent port of `CpuFft`: same Hann window, same
+bit-reversal permutation, same iterative stage loop (both channels'
+butterflies share the same per-stage twiddle math, so they run together
+in one loop rather than as two passes), and same normalization/log
+-compression formula. Only the windowing/bit-reversal (trivial,
+memory-bound) and the gravity smoothing (inherently serial across frames)
+stay on the CPU; the O(N log N) butterfly work happens on the GPU. It's
+opt-in today (pass `--fft-device gpu`) while it gets more mileage across
+different GPU vendors/drivers — see
+[Status & known issues](#status--known-issues) for the two driver-level
+bugs already found and fixed during bring-up.
+
+### GPU selection (`GpuEnumerator.cs`)
+
+`--list-gpus` enumerates the system's DRM render nodes and prints an
+indexed list of the GPUs GlavaSharp can render on:
+
+```
+Available GPUs (use --gpu <index>):
+  [0] AMD (pci id 0x1002:0x73df, driver amdgpu) [card0]
+  [1] Intel (pci id 0x8086:0x4680, driver i915) [card1]
+```
+
+Each entry shows the vendor, PCI device ID, kernel driver, and DRM card
+node backing that index. Pass the index to `--gpu <index>` to pin
+rendering to that GPU (useful on hybrid-graphics laptops where the
+default render node isn't the one you want driving the visualizer).
+`--gpu` affects which GPU renders the window/shader pipeline; it's
+independent of `--fft-device gpu`, which only controls where the FFT
+itself runs.
 
 ### Shader preprocessing (`Shaders/GlavaPreprocessor.cs`)
 
@@ -315,11 +357,13 @@ directive surface (window decoration/floating/opacity hints, geometry,
 
 ## Design trade-offs
 
-- **CPU FFT instead of GPU FFT, for now.** Costs some CPU time and a
-  texture upload every frame that GLava avoids entirely by keeping the
-  transform on the GPU. Chosen because `GpuFft` is real but currently
-  blocked on a driver bug (see [Status](#status--known-issues)); `CpuFft`
-  trades peak performance for "actually starts up reliably today."
+- **CPU FFT as the default, GPU FFT available as opt-in.** `GpuFft` is a
+  real, working, bit-for-bit-equivalent GPU implementation (see
+  [FFT](#fft-shaderscpufftcs-shadersgpufftcs)), but it's newer and has
+  already surfaced two driver-level gotchas (a compile hang, a uniform
+  type mismatch) during bring-up on a single machine. `CpuFft` stays the
+  default until `GpuFft` has more mileage across GPU vendors/drivers;
+  pass `--fft-device gpu` to try it.
 - **A small preprocessor subset instead of a full GLava-language
   reimplementation.** Enough to run real, unmodified GLava shader files
   for the common cases, at the cost of some modules (relying on the
@@ -347,8 +391,9 @@ directive surface (window decoration/floating/opacity hints, geometry,
 
 ## Roadmap
 
-- Root-cause (or work around) the `GpuFft` driver hang and switch the
-  default FFT path back to the GPU.
+- Validate `GpuFft` across more GPU vendors/drivers and switch the
+  default FFT path (`--fft-device`) to GPU once it has enough real-world
+  mileage.
 - Debug `circle`, `graph`, and `wave` against the current preprocessor;
   extend `GlavaPreprocessor`/`RcConfig` as needed rather than assuming the
   modules themselves are at fault.
@@ -401,18 +446,17 @@ dotnet build GlavaSharp.slnx
 ./build/dist/GlavaSharp                    # default sink monitor, bars module from rc.glsl
 ./build/dist/GlavaSharp --list-sinks       # see capture targets
 ./build/dist/GlavaSharp --list-gpus        # see DRM render nodes (for --gpu)
+./build/dist/GlavaSharp --gpu 1            # render on GPU index 1 from --list-gpus
+./build/dist/GlavaSharp --fft-device gpu   # run the FFT on the GPU instead of the CPU
 ./build/dist/GlavaSharp --module radial    # force a specific module
 ```
 
 See the top of `src/GlavaSharp/Program.cs` for the full CLI flag reference
-(`--shaders`, `--gpu`, `--fft-size`, `--fft-attack`/`--fft-decay`/
-`--fft-gain`, `--sample-rate`).
+(`--shaders`, `--gpu`, `--fft-device`, `--fft-size`, `--fft-attack`/
+`--fft-decay`/`--fft-gain`, `--sample-rate`).
 
 ## License
 
-No license has been chosen yet for this repository — add a `LICENSE` file
-before treating this as open source in any legal sense. The bundled shader
-tree under `src/GlavaSharp/shaders/glava/` originates from
-[GLava](https://github.com/jarcode-foss/glava); refer to that project's
-license for terms covering those files specifically, independent of
-whatever license you choose for the rest of this repo.
+This project is licensed under the MIT License. See the LICENSE file for the full license text.
+
+The bundled shader tree under src/GlavaSharp/shaders/glava/ originates from GLava and remains subject to its own license. See the original GLava project for the licensing terms that apply to those files.

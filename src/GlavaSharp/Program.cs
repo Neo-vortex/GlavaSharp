@@ -36,6 +36,13 @@ using GlavaSharp.Windowing;
 // --fft-gain <n>             log-compression contrast for bin magnitudes
 //                           before display; higher = more contrast
 //                           between quiet and loud bins. Default 40.
+// --fft-device <cpu|gpu>     which FFT backend to run: "cpu" (default,
+//                           works everywhere) or "gpu" (GLSL compute
+//                           shader; requires a GL 4.3 context with
+//                           compute-shader + SSBO support, and caps
+//                           --fft-size at 2048 -- single workgroup).
+//                           The GPU FFT runs on whichever GPU got
+//                           selected via --gpu below.
 if (args.Contains("--list-gpus"))
 {
     var gpus = GpuEnumerator.List();
@@ -66,7 +73,16 @@ if (gpuIndex is { } gidx)
     // us is inside AppWindow's constructor (GLFW window/context creation).
     // Mesa multi-GPU (e.g. Intel iGPU + AMD/Intel dGPU): DRI_PRIME picks
     // the render node by index.
-    Environment.SetEnvironmentVariable("DRI_PRIME", gidx.ToString());
+    if (gidx == 0)
+    {
+        // Default GPU (Intel)
+        Environment.SetEnvironmentVariable("DRI_PRIME", null);
+    }
+    else
+    {
+        // First offload GPU
+        Environment.SetEnvironmentVariable("DRI_PRIME", gidx.ToString());
+    }
     // NVIDIA PRIME render offload (proprietary driver, hybrid laptops):
     // harmless no-op if you don't have an NVIDIA GPU at all.
     if (gidx > 0)
@@ -78,7 +94,8 @@ if (gpuIndex is { } gidx)
 
     Console.WriteLine($"[GlavaSharp] Requesting GPU index {gidx} (DRI_PRIME={gidx}" +
                       (gidx > 0 ? ", NVIDIA prime-offload vars set" : "") + "). " +
-                      "Check the 'GL: ... / <renderer>' line below to confirm which GPU actually got used.");
+                      "Check the 'GL: ... / <renderer>' line below to confirm which GPU actually got used. " +
+                      "This also picks the GPU used by --fft-device gpu, since it shares the same GL context.");
 }
 
 if (args.Contains("--list-sinks") || args.Contains("--list-targets"))
@@ -144,6 +161,28 @@ if ((fftSize & (fftSize - 1)) != 0)
     return;
 }
 
+var fftDeviceArg = GetArgValue(args, "--fft-device") ?? "cpu";
+FftDevice fftDevice;
+switch (fftDeviceArg.Trim().ToLowerInvariant())
+{
+    case "cpu":
+        fftDevice = FftDevice.Cpu;
+        break;
+    case "gpu":
+        fftDevice = FftDevice.Gpu;
+        break;
+    default:
+        Console.Error.WriteLine($"--fft-device must be \"cpu\" or \"gpu\", got \"{fftDeviceArg}\".");
+        return;
+}
+
+if (fftDevice == FftDevice.Gpu && fftSize > 2048)
+{
+    Console.Error.WriteLine(
+        $"--fft-device gpu requires --fft-size <= 2048 (single-workgroup limit), got {fftSize}.");
+    return;
+}
+
 var sampleRate = GetArgIntValue(args, "--sample-rate") ?? rc.SampleRate;
 var fftAttack = GetArgFloatValue(args, "--fft-attack") ?? 0.6f;
 var fftDecay = GetArgFloatValue(args, "--fft-decay") ?? 0.08f;
@@ -153,9 +192,11 @@ var fftSettings = new FftSettings
     Size = fftSize,
     Attack = fftAttack,
     Decay = fftDecay,
-    Gain = fftGain
+    Gain = fftGain,
+    Device = fftDevice
 };
-Console.WriteLine($"[GlavaSharp] FFT: size={fftSize} (bins={fftSize / 2}), " +
+Console.WriteLine($"[GlavaSharp] FFT: device={fftDevice.ToString().ToLowerInvariant()}, " +
+                  $"size={fftSize} (bins={fftSize / 2}), " +
                   $"attack={fftAttack}, decay={fftDecay}, gain={fftGain}, sampleRate={sampleRate}");
 
 using var audio = new PipeWireAudioSource(sampleRate, targetId: targetId);
@@ -171,7 +212,12 @@ var options = new WindowOptions
     Height = rc.Height,
     // GLFW_PLATFORM_ANY lets GLFW auto-select Wayland when running inside a
     // Wayland session and fall back to X11 otherwise.
-    Platform = PlatformPreference.Any
+    Platform = PlatformPreference.Any,
+    // GpuFft needs GL_ARB_compute_shader + SSBOs (core in 4.3). CpuFft has
+    // no such requirement, so let it run on GLava's original 3.3 floor --
+    // useful on older/lighter-weight GL implementations.
+    GLMajor = fftDevice == FftDevice.Gpu ? 4 : 3,
+    GLMinor = fftDevice == FftDevice.Gpu ? 3 : 3
 };
 
 using var window = new AppWindow(options, audio, shaderRootDir, moduleName, fftSettings);

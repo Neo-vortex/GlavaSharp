@@ -17,7 +17,7 @@ public sealed unsafe class AppWindow : IDisposable
 {
     private readonly IAudioSource _audio;
     private readonly AudioWindow _audioWindow;
-    private readonly CpuFft _fft;
+    private readonly IFft _fft;
     private readonly ShaderModule _module;
     private readonly AudioSpectrumTexture _texL;
     private readonly AudioSpectrumTexture _texR;
@@ -65,9 +65,15 @@ public sealed unsafe class AppWindow : IDisposable
         GL.LoadBindings(new GLFWBindingsContext());
         Console.WriteLine($"[GlavaSharp] GL: {GL.GetString(StringName.Version)} / {GL.GetString(StringName.Renderer)}");
 
-        // Audio pipeline: ring buffer -> tail window -> CPU FFT -> two 1D spectrum textures.
-        Console.WriteLine($"[GlavaSharp] before fft");
-        _fft = new CpuFft(fftSettings);
+        // Audio pipeline: ring buffer -> tail window -> FFT (CPU or GPU,
+        // per FftSettings.Device) -> two 1D spectrum textures.
+        var device = fftSettings?.Device ?? FftDevice.Cpu;
+        Console.WriteLine($"[GlavaSharp] before fft (device={device})");
+        _fft = device switch
+        {
+            FftDevice.Gpu => new GpuFft(fftSettings),
+            _ => new CpuFft(fftSettings)
+        };
         Console.WriteLine($"[GlavaSharp] after fft");
         _texL = new AudioSpectrumTexture(_fft.Bins);
         _texR = new AudioSpectrumTexture(_fft.Bins);
