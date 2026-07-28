@@ -256,8 +256,7 @@ memory-bound) and the gravity smoothing (inherently serial across frames)
 stay on the CPU; the O(N log N) butterfly work happens on the GPU. It's
 opt-in today (pass `--fft-device gpu`) while it gets more mileage across
 different GPU vendors/drivers — see
-[Status & known issues](#status--known-issues) for the two driver-level
-bugs already found and fixed during bring-up.
+[Status & known issues](#status--known-issues) 
 
 ### GPU selection (`GpuEnumerator.cs`)
 
