@@ -17,6 +17,7 @@ about a broken module.
 > ecosystem (the module/`rc.glsl`/`#request` convention) is genuinely well
 > designed, and it seemed worth having that ecosystem sitting on top of a
 > different, more portable host.
+<img width="511" height="427" alt="image" src="https://github.com/user-attachments/assets/86837b73-992e-4e8f-8c0b-10df5b3c215e" />
 
 ---
 
