@@ -175,18 +175,16 @@ listed here, it's a real bug — please file an issue with the
         show through everywhere the active module doesn't draw. Verified
         visually on a live session.
   - [x] **Click-through.** First attempt: restack the window explicitly
-        below xfdesktop's own window (matched by `WM_CLASS`), not just a
-        plain sibling-less `Below` request. Didn't work — xfwm4 doesn't
-        honor it enough to place the window strictly *underneath*
-        xfdesktop specifically in `_NET_CLIENT_LIST_STACKING`; xfwm4
-        appears to keep xfdesktop pinned at the true bottom regardless of
-        what other desktop-typed clients request. Fixed differently:
-        `--desktop` now gives the window an empty SHAPE-extension input
-        region (`x11rb`'s `shape_rectangles(SET, INPUT, ..., &[])`),
-        making the entire window click-through unconditionally,
+        below xfdesktop's own window (matched by `WM_CLASS`), relying on
+        stacking order alone to keep clicks reaching desktop icons. Traded
+        away later (see the stacking bug below) once it became clear the
+        window needs to stay *above* xfdesktop to be visible at all, which
+        would have put input-routing and visibility at odds. Fixed
+        properly: `--desktop` gives the window an empty SHAPE-extension
+        input region (`x11rb`'s `shape_rectangles(SET, INPUT, ..., &[])`),
+        making the entire window click-through unconditionally, fully
         independent of stacking order — verified via `python-xlib`
-        (`win.shape_get_rectangles(Input)` returns `[]`) on the same live
-        session.
+        (`win.shape_get_rectangles(Input)` returns `[]`) on a live session.
   - [x] One thing observed but not chased down: `xprop` on the running
         window showed `_NET_WM_STATE` as `STICKY, SKIP_PAGER,
         SKIP_TASKBAR` — xfwm4 appears to overwrite the `BELOW` state
@@ -230,6 +228,110 @@ listed here, it's a real bug — please file an issue with the
       via `--list-monitors`) produced a window at exactly
       `1920x1080+1366+0`, rendering only on that monitor — the other
       monitor's wallpaper was completely untouched.
+- [x] **Bug found and fixed: window went permanently invisible after
+      clicking empty desktop space.** Root-caused live against a real
+      two-monitor xfwm4/XFCE session (not a compositor setting — first
+      suspected xfwm4's "unredirect fullscreen windows"
+      `/general/unredirect_overlays`, toggled it off, bug persisted, ruled
+      it out). `xprop -root _NET_CLIENT_LIST_STACKING` while the window was
+      hidden showed it sandwiched *below* the xfdesktop window for its own
+      monitor (xfdesktop maps one window per monitor; `xwininfo` confirmed
+      both windows shared the identical `1920x1080+1366+0` rect). Since
+      xfdesktop paints the wallpaper opaquely across its whole window,
+      GlavaSharp's alpha-blended output is only ever visible while stacked
+      *above* xfdesktop — being below it means fully hidden, not "behind
+      icons." Two compounding bugs in `x11shim`'s original restack logic:
+      (1) it deliberately requested `StackMode::BELOW` xfdesktop, which is
+      backwards from what actually makes the window visible; (2) it picked
+      its restack target as "topmost mapped window with `WM_CLASS`
+      containing xfdesktop," not the one actually covering the monitor
+      GlavaSharp renders to — wrong on any multi-monitor xfdesktop setup.
+      xfwm4's `click_to_focus` + `raise_on_click` (both on by default) raise
+      the clicked monitor's xfdesktop window on every click; the old
+      relower thread only ever lowered GlavaSharp further in response,
+      never raised it back, so the first click on that monitor's desktop
+      permanently sank the window. Fixed: `x11shim` now matches the
+      xfdesktop window by root-relative geometry overlap with its own rect
+      (`TranslateCoordinates` + `GetGeometry`, not just `WM_CLASS`) and
+      restacks *above* it, re-asserting on every `_NET_CLIENT_LIST_STACKING`
+      change so a later click-triggered raise gets immediately countered.
+      Verified live: after the fix, `_NET_CLIENT_LIST_STACKING` placed the
+      window above both xfdesktop windows, and a screenshot confirmed the
+      module rendering over the wallpaper on its target monitor.
+- [x] **Follow-up: same disappear-on-click symptom reported after the fix
+      above, on a single-monitor XFCE/X11 session.** Two robustness gaps in
+      the re-raise loop, not the restack-target logic: (1) the loop's error
+      path treated *any* failed re-raise attempt as fatal and `break`s out of
+      the thread entirely -- a single transient X error (very plausible when
+      actively fighting the WM for z-order) silently and permanently disabled
+      re-raising for the rest of the process's life, which reads exactly like
+      "disappears once and never comes back." (2) the loop only ever woke up
+      on `_NET_CLIENT_LIST_STACKING` `PropertyNotify`, with no fallback if
+      xfwm4 doesn't regenerate that property for every internal restack it
+      performs. Fixed: failed re-raises now log to stderr and keep the loop
+      alive instead of killing it, and a `PERIODIC_RERAISE_INTERVAL` (500ms)
+      timer re-asserts stacking independently of the property watch as a
+      self-healing fallback. **Live re-test showed this wasn't the actual
+      cause**: no stderr output appeared when the window disappeared on
+      click, meaning the re-raise attempt either wasn't the failure point or
+      was failing silently rather than erroring -- see the next entry.
+- [x] **Real root cause of the disappear-on-click symptom: claiming
+      `_NET_WM_WINDOW_TYPE_DESKTOP` on our own window, not a bug in the
+      re-raise loop.** This window is WM-managed (xfwm4 reparented it), so a
+      `ConfigureWindow` restack issued against it isn't applied directly by
+      the X server -- root has `SubstructureRedirect` set, so the request is
+      redirected to xfwm4 as a `ConfigureRequest` *event*, and xfwm4 decides
+      whether to actually honor it. `.check()` only surfaces X protocol
+      errors, not "the WM silently declined it," so a declined restack looks
+      identical to a successful one from our side -- explaining the lack of
+      any log output. Per EWMH, `_NET_WM_WINDOW_TYPE_DESKTOP` windows are
+      meant to always sit beneath *every other window type*, enforced by the
+      WM, not just requested -- and the entry above (in the first "Bug
+      found and fixed" section) already had the evidence for this without
+      it being connected yet: `xprop` showed xfwm4 silently overwriting our
+      requested `_NET_WM_STATE` (dropping `BELOW`) whenever this window
+      claimed type `DESKTOP`. By also claiming `_DESKTOP` (to mirror
+      xfdesktop, on the theory that matching its type would make relative
+      stacking requests meaningful), this window landed in the same
+      bottom-of-everything bucket as xfdesktop itself, where xfwm4
+      tie-breaks in xfdesktop's favor on every stacking recalculation --
+      exactly what a desktop click triggers via `click_to_focus` +
+      `raise_on_click`. Cross-checked against `xwinwrap` (the standard X11
+      "app as desktop background" tool), which sidesteps this entire class
+      of problem via override-redirect (exempting the window from WM
+      management/redirect entirely) -- not adopted here since it would mean
+      creating the X11 window ourselves instead of letting GLFW own
+      creation. Fixed instead: the window now claims
+      `_NET_WM_WINDOW_TYPE_NORMAL` with `_NET_WM_STATE_BELOW` +
+      `_NET_WM_STATE_STICKY` + `_NET_WM_STATE_SKIP_TASKBAR` +
+      `_NET_WM_STATE_SKIP_PAGER` requested explicitly (`DESKTOP` no longer
+      implies them). `BELOW` on a `NORMAL` window is a different, ordinary,
+      well-honored layer that every EWMH-compliant WM keeps *above* the
+      desktop layer as a structural invariant rather than a per-window
+      tie-break, so there's no fight to lose. The restack-above-xfdesktop
+      thread (previously the primary mechanism) stays as a defensive
+      fallback only. **Verified live**: the user confirmed the
+      disappear-on-click symptom is gone after this change.
+- [x] **Follow-up: fallback re-raise thread logging a repeating `BadWindow`
+      (error code 3) on `ConfigureWindow`, major opcode 12, after the
+      NORMAL+BELOW fix above.** Harmless to visibility (the primary
+      BELOW-layer fix already made the fallback thread unnecessary for
+      correctness) but pointed at a real staleness bug: `my_toplevel` (this
+      window's frame, per `toplevel_ancestor`) was resolved exactly *once*
+      at startup, immediately after `map_window`, then cached for the
+      thread's entire lifetime. `map_window` on a WM-managed window is
+      itself redirected (a `MapRequest` event, not an immediate map), so
+      xfwm4's actual reparenting happens asynchronously -- and separately,
+      xfwm4 appears to swap in a fresh frame shortly after seeing the Motif
+      "no decorations" hint on this same remap. Either way, the
+      once-at-startup `toplevel_ancestor` call could race ahead of xfwm4 and
+      cache a frame ID that got destroyed moments later, which then never
+      becomes valid again -- explaining the *repeating* (not one-off) error
+      on every subsequent retry. Fixed: `raise_above_desktop_owner` now
+      resolves `toplevel_ancestor` fresh on every call (initial raise and
+      every re-raise alike) instead of accepting a cached value, mirroring
+      how the xfdesktop-side sibling was already being re-resolved fresh
+      each time.
 - [ ] **GNOME** — Mutter doesn't honor `_NET_WM_WINDOW_TYPE_DESKTOP`
       stacking the way xfwm4 does, so this likely needs its own approach
       rather than reusing `x11shim`'s as-is. Not started.
@@ -561,11 +663,15 @@ window exists, `--desktop` hands its X11 window ID (via GLFW's
 `GetX11Window`) to `native/x11shim`, a small Rust crate that does the
 actual EWMH work on its own connection to the X server:
 
-- marks the window `_NET_WM_WINDOW_TYPE_DESKTOP`
+- marks the window `_NET_WM_WINDOW_TYPE_NORMAL` — deliberately *not*
+  `_DESKTOP`, even though that's what GLava's own `setxwintype "desktop"`
+  name suggests; see [Status](#status--roadmap) for why claiming the
+  `DESKTOP` type actively works against this on xfwm4
 - adds `_NET_WM_STATE_BELOW` + `_NET_WM_STATE_STICKY` ("below"/"pinned" —
   the same two states GLava's own `shaders/glava/env_Xfwm4.glsl` requests
   via `#request addxwinstate`, which GlavaSharp's `RcConfig` now actually
-  reads)
+  reads) plus `_NET_WM_STATE_SKIP_TASKBAR` + `_NET_WM_STATE_SKIP_PAGER`
+  (requested explicitly since the `DESKTOP` type no longer implies them)
 - strips decorations via `_MOTIF_WM_HINTS`
 - positions/sizes the window — the whole (multi-monitor) virtual screen by
   default, or an exact rect when the caller passes one, via either
@@ -573,22 +679,19 @@ actual EWMH work on its own connection to the X server:
   <index>` (resolved from GLFW's monitor list — see
   [Status](#status--roadmap) for why rc.glsl's own `setgeometry` is
   deliberately *not* used as an implicit fallback here)
-- restacks it below xfdesktop's own window when it can find one (matched
-  by `WM_CLASS`, via the SHAPE extension's underlying `query_tree`-walked
-  top-level/frame window; see `find_desktop_owner_toplevel`/
-  `toplevel_ancestor` in `src/lib.rs`) as a best-effort visual-ordering
-  nicety
 - gives the window an empty SHAPE-extension input region so it's fully
   click-through *unconditionally*, regardless of where the WM actually
-  ends up placing it in the stack — this, not the restacking above, is
-  what actually guarantees desktop icons stay clickable; see
-  [Status](#status--roadmap) for why the restack alone wasn't enough
-- spawns a background thread that watches the root window's
-  `_NET_CLIENT_LIST_STACKING` property for changes and re-lowers the window
-  (throttled to a 200ms minimum interval, since our own lower call is
-  itself a stacking change) — the same "keep re-lowering" behavior GLava
-  relies on to stay behind desktop icons if something else restacks it (a
-  WM restart, xfdesktop remapping its icon layer, etc.)
+  ends up placing it in the stack — this is what guarantees desktop icons
+  stay clickable, independent of the stacking mechanics below
+- as a defensive fallback (the primary "stay above xfdesktop" mechanism is
+  now the `BELOW`-vs-`DESKTOP` layer ordering above, which xfwm4 enforces
+  itself), spawns a background thread that watches the root window's
+  `_NET_CLIENT_LIST_STACKING` property for changes, plus a periodic timer,
+  and restacks above whichever xfdesktop window(s) overlap its own geometry
+  (matched by `WM_CLASS` + root-relative rect, via `find_desktop_owner_toplevel`/
+  `toplevel_ancestor` in `src/lib.rs`) — throttled to a 200ms minimum
+  interval, since our own restack call is itself a stacking change; a
+  failed attempt logs to stderr and retries rather than giving up
 
 All of this happens through `x11rb`, a pure-Rust library that speaks the
 X11 wire protocol directly over a Unix socket, rather than linking

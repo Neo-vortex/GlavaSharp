@@ -6,32 +6,72 @@
 //! only takes the resulting X11 window ID and, on its own connection to the
 //! X server, does the EWMH work GLFW has no concept of:
 //!
-//!   - marks the window `_NET_WM_WINDOW_TYPE_DESKTOP`
-//!   - adds `_NET_WM_STATE_BELOW` + `_NET_WM_STATE_STICKY` ("pinned"/"below",
-//!     the same two states GLava's own `env_Xfwm4.glsl` requests)
+//!   - marks the window `_NET_WM_WINDOW_TYPE_NORMAL` (deliberately *not*
+//!     `_DESKTOP` -- see "Why NORMAL+BELOW, not DESKTOP" below)
+//!   - adds `_NET_WM_STATE_BELOW` + `_NET_WM_STATE_STICKY` +
+//!     `_NET_WM_STATE_SKIP_TASKBAR` + `_NET_WM_STATE_SKIP_PAGER` ("pinned"/
+//!     "below" are the same two states GLava's own `env_Xfwm4.glsl`
+//!     requests; the two SKIP states replace what `_NET_WM_WINDOW_TYPE_DESKTOP`
+//!     used to imply for free)
 //!   - strips decorations via `_MOTIF_WM_HINTS`
 //!   - positions/sizes the window -- by default the whole screen, or a
 //!     specific rect when the caller passes one (GLava's `setgeometry`
 //!     equivalent for desktop mode, see `--desktop-geometry` in Program.cs)
-//!     -- and restacks it below
-//!     whichever mapped window looks like the desktop-icon owner (its
-//!     `WM_CLASS` contains "xfdesktop"), not just a sibling-less `Below`
 //!   - gives the window an empty SHAPE-extension input region, making it
-//!     fully click-through unconditionally. This is the actual fix for "the
-//!     window must not intercept clicks meant for desktop icons": on a live
-//!     xfwm4/XFCE session, even the explicit xfdesktop-relative restack
-//!     above didn't reliably land the window *underneath* xfdesktop in
-//!     `_NET_CLIENT_LIST_STACKING` -- xfwm4 appears to keep xfdesktop pinned
-//!     at the true bottom regardless of what other desktop-typed clients
-//!     request. Click-through via SHAPE sidesteps that fight entirely: it
-//!     doesn't matter where the WM actually stacks the window, nothing on
-//!     it ever receives input.
-//!   - watches the root window's `_NET_CLIENT_LIST_STACKING` for changes and
-//!     re-lowers on restack, the same "keep re-lowering" behavior GLava
-//!     relies on to stay behind desktop icons if something restacks it
-//!     (a WM restart, another desktop-layer client remapping, etc.) -- this
-//!     is now a best-effort visual-ordering nicety rather than what click
-//!     safety depends on
+//!     fully click-through unconditionally, so it never intercepts clicks
+//!     meant for desktop icons regardless of stacking order
+//!   - as a defensive fallback (not the primary mechanism -- see below),
+//!     restacks itself *above* whichever xfdesktop window(s) overlap its own
+//!     geometry, re-asserting on every `_NET_CLIENT_LIST_STACKING` change
+//!     and on a periodic timer
+//!
+//! ## Why NORMAL+BELOW, not DESKTOP
+//!
+//! Earlier versions marked this window `_NET_WM_WINDOW_TYPE_DESKTOP` too,
+//! reasoning that mirroring xfdesktop's own type would let plain stacking
+//! requests (first `BELOW` xfdesktop, then, after that was found to hide
+//! the window entirely, `ABOVE` xfdesktop) place us correctly relative to
+//! it. Both failed, and for the same underlying reason: this window is
+//! WM-managed (xfwm4 reparented it), so any `ConfigureWindow` restack we
+//! issue on it isn't applied directly by the X server -- root has
+//! `SubstructureRedirect` set, so it's redirected to xfwm4 as a
+//! `ConfigureRequest` *event*, and xfwm4 decides whether to actually honor
+//! it. `.check()` only surfaces X protocol errors, not "the WM silently
+//! declined it," so a declined request looks identical to a successful one
+//! from our side. Per the EWMH spec, `_NET_WM_WINDOW_TYPE_DESKTOP` windows
+//! are meant to always sit beneath *every other window type*, as a
+//! WM-enforced invariant -- and xfwm4 enforces it hard: `xprop` on this
+//! window while it still requested `_DESKTOP` showed `_NET_WM_STATE` as
+//! `STICKY, SKIP_PAGER, SKIP_TASKBAR` -- xfwm4 was silently overwriting our
+//! requested state (including `BELOW`) with its own computed set, i.e. it
+//! was never honoring our state request at all for a `_DESKTOP`-typed
+//! window. By also claiming `_DESKTOP`, we put ourselves in the same
+//! bottom-of-everything bucket as xfdesktop itself, where xfwm4
+//! tie-breaks in xfdesktop's favor on every stacking recalculation --
+//! exactly what a desktop click triggers (`click_to_focus` +
+//! `raise_on_click` re-raise xfdesktop), permanently sinking us with no
+//! error and nothing to catch.
+//!
+//! The fix: don't claim `_DESKTOP` at all. `_NET_WM_WINDOW_TYPE_NORMAL` +
+//! `_NET_WM_STATE_BELOW` puts this window in the ordinary "below normal
+//! windows" layer, which every EWMH-compliant WM (xfwm4 included) keeps
+//! *above* the desktop layer as a structural invariant, not a per-window
+//! tie-break -- so there's no fight to lose. `SKIP_TASKBAR`/`SKIP_PAGER`
+//! are requested explicitly since `_DESKTOP` no longer implies them.
+//! (`xwinwrap`, the standard X11 "run something as the desktop background"
+//! tool, sidesteps this whole class of problem differently -- via
+//! override-redirect, which exempts a window from WM management/redirect
+//! entirely. That's not done here since it would need creating the X11
+//! window ourselves instead of letting GLFW own creation.)
+//!
+//! The restack-above-xfdesktop logic (originally the primary mechanism) is
+//! kept as a defensive fallback: it's a manual `ConfigureWindow`, still
+//! subject to the same WM redirection described above, so it's only ever
+//! as reliable as xfwm4 choosing to honor it -- but now that we're not
+//! fighting a hard-enforced type invariant, there's no known reason for it
+//! to be declined, and it costs little to leave running as a second line of
+//! defense (e.g. if some xfwm4 config/version doesn't layer BELOW/DESKTOP
+//! the way the spec describes).
 //!
 //! Uses x11rb instead of linking libX11: it speaks the X11 wire protocol
 //! directly over a Unix socket in pure Rust, so unlike pwshim's `pipewire`
@@ -59,10 +99,12 @@ use x11rb::protocol::shape::{ConnectionExt as _, SK, SO};
 atom_manager! {
     pub AtomCollection: AtomCollectionCookie {
         _NET_WM_WINDOW_TYPE,
-        _NET_WM_WINDOW_TYPE_DESKTOP,
+        _NET_WM_WINDOW_TYPE_NORMAL,
         _NET_WM_STATE,
         _NET_WM_STATE_BELOW,
         _NET_WM_STATE_STICKY,
+        _NET_WM_STATE_SKIP_TASKBAR,
+        _NET_WM_STATE_SKIP_PAGER,
         _MOTIF_WM_HINTS,
         _NET_CLIENT_LIST_STACKING,
     }
@@ -72,12 +114,25 @@ atom_manager! {
 // value of 0 with this bit set means "no decorations at all".
 const MWM_HINTS_DECORATIONS: u32 = 1 << 1;
 
-// Minimum gap between re-lower attempts triggered by stacking-change events.
-// Without this, our own configure_window(BELOW) call changes
+// Minimum gap between re-raise attempts triggered by stacking-change events.
+// Without this, our own configure_window(ABOVE) call changes
 // _NET_CLIENT_LIST_STACKING, which re-triggers the listener that just fired
-// it -- a tight feedback loop. 200ms is imperceptible for "stay behind the
-// icons" purposes and comfortably breaks that loop.
-const RELOWER_MIN_INTERVAL: Duration = Duration::from_millis(200);
+// it -- a tight feedback loop. 200ms is imperceptible for "stay above
+// xfdesktop" purposes and comfortably breaks that loop.
+const RERAISE_MIN_INTERVAL: Duration = Duration::from_millis(200);
+
+// Upper bound on how long we go without re-asserting our stacking position
+// even without an observed _NET_CLIENT_LIST_STACKING change. xfwm4 doesn't
+// reliably regenerate that property for every internal restack it performs
+// (e.g. re-raising xfdesktop in response to a desktop click), so relying on
+// PropertyNotify alone can miss the exact moment we get hidden -- this is a
+// cheap timer-driven fallback on top of the event-driven path, not a
+// replacement for it.
+const PERIODIC_RERAISE_INTERVAL: Duration = Duration::from_millis(500);
+
+// (x, y, width, height), all root-relative/absolute -- same convention
+// xwininfo's "Absolute upper-left X/Y" + "Width"/"Height" report.
+type Rect = (i32, i32, u32, u32);
 
 struct ShimHandle {
     stop: Arc<AtomicBool>,
@@ -142,12 +197,15 @@ fn try_start(
     // map again -- invisible to the user since nothing has rendered yet.
     conn.unmap_window(window)?.check()?;
 
+    // Deliberately NOT _NET_WM_WINDOW_TYPE_DESKTOP -- see the module doc
+    // comment ("Why NORMAL+BELOW, not DESKTOP") for why that type actively
+    // works against us on xfwm4.
     conn.change_property32(
         PropMode::REPLACE,
         window,
         atoms._NET_WM_WINDOW_TYPE,
         AtomEnum::ATOM,
-        &[atoms._NET_WM_WINDOW_TYPE_DESKTOP],
+        &[atoms._NET_WM_WINDOW_TYPE_NORMAL],
     )?
     .check()?;
 
@@ -156,7 +214,12 @@ fn try_start(
         window,
         atoms._NET_WM_STATE,
         AtomEnum::ATOM,
-        &[atoms._NET_WM_STATE_BELOW, atoms._NET_WM_STATE_STICKY],
+        &[
+            atoms._NET_WM_STATE_BELOW,
+            atoms._NET_WM_STATE_STICKY,
+            atoms._NET_WM_STATE_SKIP_TASKBAR,
+            atoms._NET_WM_STATE_SKIP_PAGER,
+        ],
     )?
     .check()?;
 
@@ -185,11 +248,8 @@ fn try_start(
 
     // Make the whole window click-through (empty INPUT shape) via the SHAPE
     // extension, so it never intercepts clicks meant for desktop icons --
-    // this is independent of and more reliable than window-stacking order,
-    // since (per live testing against xfwm4) a plain client restack request
-    // doesn't reliably get the window placed strictly *below* xfdesktop's
-    // own windows; xfwm4 appears to keep xfdesktop pinned at the true
-    // bottom regardless. A visualizer has no reason to receive input at all.
+    // this is independent of and doesn't depend on stacking order: a
+    // visualizer has no reason to receive input at all.
     conn.shape_rectangles(SO::SET, SK::INPUT, ClipOrdering::UNSORTED, window, 0, 0, &[])?
         .check()?;
 
@@ -197,13 +257,15 @@ fn try_start(
     // actually be an X11 sibling (same parent) of the window being
     // configured -- since a reparenting WM puts each client's *frame*, not
     // the raw client window, directly under root, both windows have to be
-    // walked up to their frame before this is a valid request. See
-    // `toplevel_ancestor` / `find_desktop_owner_sibling` below.
-    let my_toplevel = toplevel_ancestor(&*conn, screen.root, window)?;
-    lower_below_desktop_owner(&*conn, screen.root, my_toplevel, window, &atoms)?;
+    // walked up to their frame before this is a valid request. (Resolved
+    // fresh inside raise_above_desktop_owner on every call, not cached here
+    // -- see that function's doc comment for why.)
+    let my_rect: Rect = (rect_x, rect_y, rect_w, rect_h);
+    raise_above_desktop_owner(&*conn, screen.root, window, &atoms, my_rect)?;
 
-    // Watch the root window for stacking changes so we can re-lower
-    // ourselves if something restacks us above the desktop-icon layer.
+    // Watch the root window for stacking changes so we can re-raise
+    // ourselves above xfdesktop if a click (or anything else) restacks it
+    // above us.
     conn.change_window_attributes(
         screen.root,
         &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
@@ -219,13 +281,13 @@ fn try_start(
     let join = thread::Builder::new()
         .name("glavasharp-x11-desktop".into())
         .spawn(move || {
-            run_relower_loop(
+            run_reraise_loop(
                 conn_for_thread,
                 screen.root,
-                my_toplevel,
                 window,
                 atoms,
                 stacking_atom,
+                my_rect,
                 stop_for_thread,
             )
         })
@@ -256,10 +318,39 @@ fn toplevel_ancestor<C: Connection>(
     }
 }
 
+/// Root-relative geometry of `win` -- absolute position (via
+/// `TranslateCoordinates` from `win`'s own origin to `root`) plus size (via
+/// `GetGeometry`). Same numbers `xwininfo -id win` reports as "Absolute
+/// upper-left X/Y" + "Width"/"Height".
+fn absolute_rect<C: Connection>(conn: &C, root: Window, win: Window) -> Option<Rect> {
+    let geom = conn.get_geometry(win).ok()?.reply().ok()?;
+    let translated = conn
+        .translate_coordinates(win, root, 0, 0)
+        .ok()?
+        .reply()
+        .ok()?;
+    Some((
+        translated.dst_x as i32,
+        translated.dst_y as i32,
+        geom.width as u32,
+        geom.height as u32,
+    ))
+}
+
+fn rects_overlap(a: Rect, b: Rect) -> bool {
+    let (ax, ay, aw, ah) = a;
+    let (bx, by, bw, bh) = b;
+    ax < bx + bw as i32 && bx < ax + aw as i32 && ay < by + bh as i32 && by < ay + ah as i32
+}
+
 /// Finds the topmost mapped window in `_NET_CLIENT_LIST_STACKING` whose
 /// `WM_CLASS` mentions "xfdesktop" (case-insensitively covers both the
-/// instance and class parts of the property in one string), and returns
-/// *its* top-level/frame ancestor -- the actual valid `sibling` for a
+/// instance and class parts of the property in one string) *and* whose
+/// root-relative geometry overlaps `target_rect` -- i.e. the xfdesktop
+/// window actually covering the monitor(s) GLava itself was placed on, not
+/// just whichever xfdesktop window happens to be topmost overall (which,
+/// with one xfdesktop window per monitor, can be the wrong one). Returns
+/// its top-level/frame ancestor -- the actual valid `sibling` for a
 /// ConfigureWindow restack. Best-effort: any protocol error along the way
 /// just means "couldn't find it," not a hard failure.
 fn find_desktop_owner_toplevel<C: Connection>(
@@ -267,6 +358,7 @@ fn find_desktop_owner_toplevel<C: Connection>(
     root: Window,
     me: Window,
     atoms: &AtomCollection,
+    target_rect: Rect,
 ) -> Option<Window> {
     let stacking = conn
         .get_property(false, root, atoms._NET_CLIENT_LIST_STACKING, AtomEnum::WINDOW, 0, u32::MAX)
@@ -284,32 +376,49 @@ fn find_desktop_owner_toplevel<C: Connection>(
             continue;
         };
         let Ok(prop) = cookie.reply() else { continue };
-        if String::from_utf8_lossy(&prop.value)
+        if !String::from_utf8_lossy(&prop.value)
             .to_lowercase()
             .contains("xfdesktop")
         {
-            best = Some(client); // last match wins -> topmost xfdesktop window in the stack
+            continue;
+        }
+        let Some(rect) = absolute_rect(conn, root, client) else {
+            continue;
+        };
+        if rects_overlap(rect, target_rect) {
+            best = Some(client); // last match wins -> topmost overlapping xfdesktop window
         }
     }
 
     toplevel_ancestor(conn, root, best?).ok()
 }
 
-/// Restacks `my_toplevel` directly below the desktop-icon owner's frame
-/// when we can find one, falling back to a plain sibling-less `Below`
-/// restack (bottom of our own stacking layer) otherwise.
-fn lower_below_desktop_owner<C: Connection>(
+/// Restacks `me`'s toplevel/frame directly above the xfdesktop window(s)
+/// covering `target_rect` when we can find one, falling back to a plain
+/// sibling-less `Above` restack (top of our own stacking layer) otherwise.
+///
+/// Resolves `me`'s toplevel via `toplevel_ancestor` fresh on every call
+/// rather than accepting a cached one from the caller: xfwm4 doesn't
+/// necessarily keep the frame it created at the very first map -- e.g. it's
+/// been observed to swap in a new frame shortly after a Motif "no
+/// decorations" hint change lands on a remap, which raced ahead of a
+/// once-at-startup `toplevel_ancestor` call and left it holding a since-
+/// destroyed window ID (`BadWindow` on every subsequent `ConfigureWindow`,
+/// forever, since that ID never becomes valid again). Re-resolving here
+/// costs one extra `QueryTree` round-trip per call and is immune to that.
+fn raise_above_desktop_owner<C: Connection>(
     conn: &C,
     root: Window,
-    my_toplevel: Window,
     me: Window,
     atoms: &AtomCollection,
+    target_rect: Rect,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let aux = match find_desktop_owner_toplevel(conn, root, me, atoms) {
+    let my_toplevel = toplevel_ancestor(conn, root, me)?;
+    let aux = match find_desktop_owner_toplevel(conn, root, me, atoms, target_rect) {
         Some(sibling) if sibling != my_toplevel => {
-            ConfigureWindowAux::new().sibling(sibling).stack_mode(StackMode::BELOW)
+            ConfigureWindowAux::new().sibling(sibling).stack_mode(StackMode::ABOVE)
         }
-        _ => ConfigureWindowAux::new().stack_mode(StackMode::BELOW),
+        _ => ConfigureWindowAux::new().stack_mode(StackMode::ABOVE),
     };
     conn.configure_window(my_toplevel, &aux)?.check()?;
     Ok(())
@@ -318,34 +427,52 @@ fn lower_below_desktop_owner<C: Connection>(
 /// Polls (rather than blocking on `wait_for_event`) so `stop` can be
 /// observed promptly without needing a self-pipe/eventfd just to interrupt a
 /// blocking socket read -- 50ms poll granularity is unnoticeable for both
-/// shutdown latency and "stay behind the icons" responsiveness.
+/// shutdown latency and "stay above xfdesktop" responsiveness. Re-raises are
+/// triggered both by `_NET_CLIENT_LIST_STACKING` changes and, as a fallback,
+/// on a plain timer (`PERIODIC_RERAISE_INTERVAL`) in case xfwm4 doesn't
+/// regenerate that property for every internal restack.
 #[allow(clippy::too_many_arguments)]
-fn run_relower_loop<C: Connection>(
+fn run_reraise_loop<C: Connection>(
     conn: Arc<C>,
     root: Window,
-    my_toplevel: Window,
     me: Window,
     atoms: AtomCollection,
     stacking_atom: u32,
+    target_rect: Rect,
     stop: Arc<AtomicBool>,
 ) {
-    let mut last_lower = Instant::now() - RELOWER_MIN_INTERVAL;
+    let mut last_raise = Instant::now() - RERAISE_MIN_INTERVAL;
+
+    // A transient X error here (xfwm4 fighting us for z-order, a stale
+    // window ID mid-restack, ...) must not kill this thread -- that would
+    // silently and permanently disable re-raising for the rest of the
+    // process's life, which is worse than just skipping one attempt and
+    // trying again on the next trigger. Log and keep going.
+    let try_raise = |last_raise: &mut Instant| {
+        let now = Instant::now();
+        if now.duration_since(*last_raise) < RERAISE_MIN_INTERVAL {
+            return;
+        }
+        if let Err(e) = raise_above_desktop_owner(&*conn, root, me, &atoms, target_rect) {
+            eprintln!("x11shim: re-raise above xfdesktop failed (will retry): {e}");
+        }
+        *last_raise = now;
+    };
 
     while !stop.load(Ordering::Relaxed) {
         match conn.poll_for_event() {
             Ok(Some(Event::PropertyNotify(ev))) => {
                 if ev.atom == stacking_atom {
-                    let now = Instant::now();
-                    if now.duration_since(last_lower) >= RELOWER_MIN_INTERVAL {
-                        if lower_below_desktop_owner(&*conn, root, my_toplevel, me, &atoms).is_err() {
-                            break;
-                        }
-                        last_lower = now;
-                    }
+                    try_raise(&mut last_raise);
                 }
             }
             Ok(Some(_)) => {}
-            Ok(None) => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                thread::sleep(Duration::from_millis(50));
+                if Instant::now().duration_since(last_raise) >= PERIODIC_RERAISE_INTERVAL {
+                    try_raise(&mut last_raise);
+                }
+            }
             Err(_) => break,
         }
     }

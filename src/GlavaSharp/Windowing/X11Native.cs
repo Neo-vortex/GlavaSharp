@@ -6,10 +6,11 @@ namespace GlavaSharp.Windowing;
 /// <summary>
 ///     P/Invoke surface onto native/x11shim (Rust), which does the actual
 ///     EWMH desktop-mode work (see native/x11shim/src/lib.rs) -- setting
-///     _NET_WM_WINDOW_TYPE_DESKTOP/_NET_WM_STATE, stripping decorations, and
-///     re-lowering the window on restack. Mirrors Audio/PipeWireNative.cs:
-///     a thin LibraryImport layer over a statically-linked Rust staticlib,
-///     not a C# reimplementation of the X11 protocol work.
+///     _NET_WM_WINDOW_TYPE_NORMAL/_NET_WM_STATE (below/sticky/skip_taskbar/
+///     skip_pager), stripping decorations, and restacking above xfdesktop on
+///     restack as a fallback. Mirrors Audio/PipeWireNative.cs: a thin
+///     LibraryImport layer over a statically-linked Rust staticlib, not a C#
+///     reimplementation of the X11 protocol work.
 /// </summary>
 internal static partial class X11Native
 {

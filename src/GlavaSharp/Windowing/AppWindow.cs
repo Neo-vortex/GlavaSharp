@@ -91,7 +91,10 @@ public sealed unsafe class AppWindow : IDisposable
         _audioWindow = new AudioWindow(_fft.N, Math.Max(_audio.Channels, 2));
 
         // Visual pipeline: GLava module directory (numbered .frag passes).
-        _module = new ShaderModule(shaderRootDir, moduleName);
+        // useAlpha: true whenever the window actually has a usable alpha
+        // channel (TransparentFramebuffer is only requested in desktop mode,
+        // above) -- see ShaderModule's constructor doc for why this matters.
+        _module = new ShaderModule(shaderRootDir, moduleName, options.DesktopMode);
         Console.WriteLine($"[GlavaSharp] Loaded module '{moduleName}' from {_module.ModuleDir}");
     }
 
@@ -161,12 +164,12 @@ public sealed unsafe class AppWindow : IDisposable
                 "continuing as a normal window.");
         else if (geomW > 0 && geomH > 0)
             Console.WriteLine(
-                "[GlavaSharp] Desktop mode enabled (X11 EWMH: _NET_WM_WINDOW_TYPE_DESKTOP, " +
-                $"below+sticky, auto-relower on stacking changes), geometry {geomW}x{geomH}+{geomX}+{geomY}.");
+                "[GlavaSharp] Desktop mode enabled (X11 EWMH: NORMAL+below+sticky+skip_taskbar/pager, " +
+                $"auto-restacked above xfdesktop as a fallback, click-through), geometry {geomW}x{geomH}+{geomX}+{geomY}.");
         else
             Console.WriteLine(
-                "[GlavaSharp] Desktop mode enabled (X11 EWMH: _NET_WM_WINDOW_TYPE_DESKTOP, " +
-                "below+sticky, auto-relower on stacking changes), covering the whole screen.");
+                "[GlavaSharp] Desktop mode enabled (X11 EWMH: NORMAL+below+sticky+skip_taskbar/pager, " +
+                "auto-restacked above xfdesktop as a fallback, click-through), covering the whole screen.");
     }
 
     /// <summary>

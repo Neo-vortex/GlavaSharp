@@ -44,7 +44,19 @@ public sealed class ShaderModule : IDisposable
     private int _histFboA, _histTexA, _histFboB, _histTexB;
     private bool _historyReadIsA = true;
 
-    public ShaderModule(string rootDir, string moduleName)
+    /// <param name="rootDir">Shader root (e.g. .../glava).</param>
+    /// <param name="moduleName">Module directory name under <paramref name="rootDir" /> (e.g. "radial").</param>
+    /// <param name="useAlpha">
+    ///     Whether the window actually has a usable alpha channel to blend
+    ///     against (GlavaSharp's desktop/transparent-framebuffer mode).
+    ///     Injected as GLava's host-computed `_USE_ALPHA` macro, which
+    ///     modules like radial/circle gate their edge-antialiasing alpha
+    ///     falloff on -- see radial.glsl's own comment: "aliasing ... requires
+    ///     `xroot` transparency to be enabled since it relies on alpha
+    ///     blending with the background." Without this defined, that branch
+    ///     is always dead code and edges render as hard steps.
+    /// </param>
+    public ShaderModule(string rootDir, string moduleName, bool useAlpha)
     {
         RootDir = rootDir;
         ModuleName = moduleName;
@@ -78,7 +90,7 @@ public sealed class ShaderModule : IDisposable
             var (src, uniformBindings) = GlavaPreprocessor.Process(fragPath, ModuleDir, RootDir);
             var pass = new Pass { SourcePath = fragPath };
             Console.WriteLine($"[GlavaSharp] compiling pass {fragPath} ...");
-            if (TryCompilePass(src, fragPath, out var program, out var disabledStage))
+            if (TryCompilePass(src, fragPath, useAlpha, out var program, out var disabledStage))
             {
                 Console.WriteLine($"[GlavaSharp] pass {fragPath} compiled+linked OK");
                 pass.Enabled = true;
@@ -323,7 +335,8 @@ public sealed class ShaderModule : IDisposable
     ///     tells the caller whether it was specifically GLava's `#error __disablestage`
     ///     sentinel (an intentional no-op stage) versus a real shader bug.
     /// </returns>
-    private static bool TryCompilePass(string fragSource, string path, out int program, out bool disabledStage)
+    private static bool TryCompilePass(string fragSource, string path, bool useAlpha, out int program,
+        out bool disabledStage)
     {
         program = 0;
         disabledStage = false;
@@ -335,7 +348,13 @@ public sealed class ShaderModule : IDisposable
         CheckShader(vs, "vertex (fullscreen triangle)"); // this one's ours; a failure here is always a real bug
         Console.WriteLine("[GlavaSharp]   vertex shader compiled OK");
 
-        var fullFrag = "#version 430 core\n" + fragSource;
+        // _USE_ALPHA is GLava's host-computed macro (like _SMOOTH_FACTOR),
+        // not something modules define themselves -- gates the alpha-blend
+        // edge antialiasing in radial/circle's shaders, which only makes
+        // sense when the window actually has a usable alpha channel to blend
+        // against. Must land before any #include content, hence right after
+        // #version rather than anywhere GlavaPreprocessor could have put it.
+        var fullFrag = $"#version 430 core\n#define _USE_ALPHA {(useAlpha ? 1 : 0)}\n" + fragSource;
         var fs = GL.CreateShader(ShaderType.FragmentShader);
         GL.ShaderSource(fs, fullFrag);
         GL.CompileShader(fs);
