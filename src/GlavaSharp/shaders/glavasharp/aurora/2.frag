@@ -1,9 +1,8 @@
 /* GlavaSharp-original module -- see 1.frag. Displays the drifting aurora
    feedback buffer (fixed resolution, independent of window size) stretched
    to fill the actual window: cheap dual-radius bloom, luminance-gradient
-   edge highlighting (reusing the bloom taps, not extra fetches), a static
-   starfield in the empty sky, and atmospheric haze on top of the original
-   glow/alpha handling. */
+   edge highlighting (reusing the bloom taps, not extra fetches), and
+   atmospheric haze on top of the original glow/alpha handling. */
 
 #request uniform "screen" screen
 uniform ivec2 screen;
@@ -45,26 +44,11 @@ void sampleNeighborhood(sampler2D tx, vec2 uv, vec2 texel, float radius, out vec
     edgeMag = length(grad);
 }
 
-/* Fixed, non-animated starfield (no time uniform in this pass, same as
-   everywhere else): a sparse hash-thresholded point per grid cell, with a
-   second hash giving each star its own brightness so they don't all read
-   as identical dots. Masked out anywhere the aurora already has presence,
-   so stars only show up in genuinely empty sky. */
-float starField(vec2 uv, float existingPresence) {
-    float aspect = float(screen.y) / float(screen.x);
-    vec2 cell = floor(uv * vec2(STAR_GRID, STAR_GRID * aspect));
-    float presenceMask = 1.0 - clamp(existingPresence * 4.0, 0.0, 1.0);
-    float isStar = step(STAR_DENSITY, hash21(cell));
-    float brightness = mix(0.4, 1.0, hash21(cell + 91.7));
-    return isStar * brightness * presenceMask;
-}
-
 void main() {
     vec2 uv = gl_FragCoord.xy / vec2(screen);
     vec2 texel = 1.0 / vec2(screen);
 
     vec4 c = texture(tex, uv);
-    float existingPresence = max(max(c.r, c.g), c.b);
 
     vec3 bloomNear; float edgeMag;
     sampleNeighborhood(tex, uv, texel, BLOOM_RADIUS, bloomNear, edgeMag);
@@ -75,9 +59,6 @@ void main() {
     c.rgb += bloomNear * BLOOM_STRENGTH + bloomFar * BLOOM_STRENGTH2;
     c.rgb += edgeMag * EDGE_STRENGTH * EDGE_COLOR;
 
-    float star = starField(uv, existingPresence);
-    c.rgb += STAR_COLOR * star;
-
     /* Atmospheric haze: a faint cool tint that grows with height, standing
        in for aerial perspective -- the "higher = further into the sky, so
        fainter/cooler" depth cue real aurora photos have. */
@@ -87,8 +68,8 @@ void main() {
     c.rgb *= GLOW;
 
     /* Alpha follows brightness, not a separate channel -- fully transparent
-       wherever the aurora hasn't reached (or has fully faded, or there's
-       just a dim star), so the desktop shows through everywhere else, the
-       same "nothing drawn here" convention radial/bars/circle use. */
+       wherever the aurora hasn't reached (or has fully faded), so the
+       desktop shows through everywhere else, the same "nothing drawn here"
+       convention radial/bars/circle use. */
     fragment = vec4(c.rgb, clamp(max(max(c.r, c.g), c.b), 0.0, 1.0));
 }

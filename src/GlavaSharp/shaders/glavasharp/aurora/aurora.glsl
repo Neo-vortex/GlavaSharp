@@ -118,7 +118,7 @@ const float LAYER_HUE[3]         = float[3](0.0, 0.06, -0.05);
 #define TEMPORAL_SHARPEN_GAMMA 0.92
 #define SATURATION_RESTORE 1.06
 
-/* ---- Display pass (2.frag): bloom, edges, haze, stars ------------------ */
+/* ---- Display pass (2.frag): bloom, edges, haze -------------------------- */
 #define GLOW 1.6
 #define BLOOM_STRENGTH 0.45
 #define BLOOM_RADIUS 2.2
@@ -129,16 +129,6 @@ const vec3 EDGE_COLOR = vec3(0.85, 0.95, 1.0);
 const vec3 LUMA_WEIGHTS = vec3(0.299, 0.587, 0.114);
 #define HAZE_STRENGTH 0.22
 const vec3 HAZE_COLOR = vec3(0.02, 0.05, 0.10);
-
-/* Fixed, static starfield in the empty sky behind the aurora -- there's no
-   time uniform in this pass either, so these don't twinkle; they're a
-   still backdrop, not an animated one. Density is a probability threshold
-   (closer to 1 = fewer stars), brightness varies per-star from a second
-   hash so they don't all read as the same dot. */
-#define STAR_GRID 220.0
-#define STAR_DENSITY 0.988
-#define STAR_BRIGHTNESS 0.55
-const vec3 STAR_COLOR = vec3(0.80, 0.85, 1.0);
 
 /* ---- Palette ------------------------------------------------------------
    Hand-authored northern-lights gradient (unchanged stops), now sampled
