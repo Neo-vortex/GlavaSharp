@@ -56,7 +56,15 @@ public sealed class ShaderModule : IDisposable
     ///     blending with the background." Without this defined, that branch
     ///     is always dead code and edges render as hard steps.
     /// </param>
-    public ShaderModule(string rootDir, string moduleName, bool useAlpha)
+    /// <param name="freqPrebucketed">
+    ///     Whether <see cref="FftSettings.Scale" /> is doing perceptual
+    ///     frequency bucketing (see <see cref="FrequencyBucketing" />)
+    ///     upstream in the active <see cref="IFft" /> backend already.
+    ///     Injected as the GlavaSharp-original `_FREQ_PREBUCKETED` macro,
+    ///     which `util/smooth.glsl`'s `scale_audio` checks to skip its own
+    ///     log-ish warp -- applying both would warp the spectrum twice.
+    /// </param>
+    public ShaderModule(string rootDir, string moduleName, bool useAlpha, bool freqPrebucketed)
     {
         RootDir = rootDir;
         ModuleName = moduleName;
@@ -90,7 +98,7 @@ public sealed class ShaderModule : IDisposable
             var (src, uniformBindings) = GlavaPreprocessor.Process(fragPath, ModuleDir, RootDir);
             var pass = new Pass { SourcePath = fragPath };
             Console.WriteLine($"[GlavaSharp] compiling pass {fragPath} ...");
-            if (TryCompilePass(src, fragPath, useAlpha, out var program, out var disabledStage))
+            if (TryCompilePass(src, fragPath, useAlpha, freqPrebucketed, out var program, out var disabledStage))
             {
                 Console.WriteLine($"[GlavaSharp] pass {fragPath} compiled+linked OK");
                 pass.Enabled = true;
@@ -335,8 +343,8 @@ public sealed class ShaderModule : IDisposable
     ///     tells the caller whether it was specifically GLava's `#error __disablestage`
     ///     sentinel (an intentional no-op stage) versus a real shader bug.
     /// </returns>
-    private static bool TryCompilePass(string fragSource, string path, bool useAlpha, out int program,
-        out bool disabledStage)
+    private static bool TryCompilePass(string fragSource, string path, bool useAlpha, bool freqPrebucketed,
+        out int program, out bool disabledStage)
     {
         program = 0;
         disabledStage = false;
@@ -352,9 +360,15 @@ public sealed class ShaderModule : IDisposable
         // not something modules define themselves -- gates the alpha-blend
         // edge antialiasing in radial/circle's shaders, which only makes
         // sense when the window actually has a usable alpha channel to blend
-        // against. Must land before any #include content, hence right after
-        // #version rather than anywhere GlavaPreprocessor could have put it.
-        var fullFrag = $"#version 430 core\n#define _USE_ALPHA {(useAlpha ? 1 : 0)}\n" + fragSource;
+        // against. _FREQ_PREBUCKETED is the same idea for
+        // util/smooth.glsl's scale_audio -- see FrequencyBucketing's doc
+        // comment. Both must land before any #include content, hence right
+        // after #version rather than anywhere GlavaPreprocessor could have
+        // put them.
+        var fullFrag = "#version 430 core\n" +
+                       $"#define _USE_ALPHA {(useAlpha ? 1 : 0)}\n" +
+                       $"#define _FREQ_PREBUCKETED {(freqPrebucketed ? 1 : 0)}\n" +
+                       fragSource;
         var fs = GL.CreateShader(ShaderType.FragmentShader);
         GL.ShaderSource(fs, fullFrag);
         GL.CompileShader(fs);

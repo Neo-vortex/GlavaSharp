@@ -94,7 +94,12 @@ public sealed unsafe class AppWindow : IDisposable
         // useAlpha: true whenever the window actually has a usable alpha
         // channel (TransparentFramebuffer is only requested in desktop mode,
         // above) -- see ShaderModule's constructor doc for why this matters.
-        _module = new ShaderModule(shaderRootDir, moduleName, options.DesktopMode);
+        // freqPrebucketed: mirrors whatever FrequencyScale _fft actually
+        // ended up using (defaults to Log2 same as FftSettings itself when
+        // fftSettings is null) so util/smooth.glsl's warp gets disabled
+        // exactly when CpuFft/GpuFft are actually bucketing upstream.
+        var freqPrebucketed = (fftSettings?.Scale ?? FrequencyScale.Log2) != FrequencyScale.Linear;
+        _module = new ShaderModule(shaderRootDir, moduleName, options.DesktopMode, freqPrebucketed);
         Console.WriteLine($"[GlavaSharp] Loaded module '{moduleName}' from {_module.ModuleDir}");
     }
 

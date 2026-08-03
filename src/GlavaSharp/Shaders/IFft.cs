@@ -12,7 +12,13 @@ public interface IFft : IDisposable
     /// <summary>FFT window/buffer size in samples (power of two).</summary>
     int N { get; }
 
-    /// <summary>Number of output bins, N / 2.</summary>
+    /// <summary>
+    ///     Length of the arrays <see cref="Process" /> returns. Equal to N/2
+    ///     (raw FFT bins) when <see cref="FftSettings.Scale" /> is
+    ///     <see cref="FrequencyScale.Linear" />; otherwise the perceptual
+    ///     bucket count (see <see cref="FrequencyBucketing" />) the raw N/2
+    ///     bins get redistributed into before ever leaving this backend.
+    /// </summary>
     int Bins { get; }
 
     /// <summary>

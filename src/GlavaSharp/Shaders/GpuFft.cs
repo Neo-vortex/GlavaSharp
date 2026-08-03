@@ -15,7 +15,7 @@ namespace GlavaSharp.Shaders;
 ///     smoothing (inherently serial across frames, one value per bin) stay on
 ///     the CPU; the O(N log N) butterfly work happens on the GPU.
 ///     Single-workgroup (local_size_x = N/2), so the whole transform lives in
-///     `shared` memory without ping-ponging buffers -- this caps N at 2048
+///     `shared` memory without ping-ponging buffers -- this caps N at 8192
 ///     (same limit <c>CpuFft</c> doesn't have, since it's not workgroup-bound,
 ///     but which matches the shared default of <see cref="FftSettings.Size" />).
 /// </summary>
@@ -124,8 +124,19 @@ public sealed class GpuFft : IFft
     private readonly float _windowGain;
 
     private readonly float[] _cpuInL, _cpuInR; // windowed + bit-reversed, real-valued (imag part is implicit 0)
-    private readonly float[] _rawOutL, _rawOutR;
-    private readonly float[] _smoothL, _smoothR; // gravity-smoothed, CPU-side (inherently serial across frames)
+    private readonly float[] _rawOutL, _rawOutR; // raw, linearly-spaced (length N/2), read back from the GPU
+
+    // Perceptual bucketing (see FrequencyBucketing), null for FrequencyScale.Linear
+    // -- in which case _rawOutL/_rawOutR feed ApplyGravity directly instead.
+    // Same CPU-side bucketing CpuFft uses: cheap relative to the actual
+    // O(N log N) transform, which stays on the GPU either way.
+    private readonly FrequencyBucketing? _bucketing;
+
+    // Bucketed-but-not-yet-gravity-smoothed scratch (length Bins), only
+    // allocated/used when _bucketing is non-null.
+    private readonly float[]? _bucketedL, _bucketedR;
+
+    private readonly float[] _smoothL, _smoothR; // gravity-smoothed, CPU-side (inherently serial across frames); length Bins
 
     private readonly int _program;
     private readonly int _logNLoc, _normFactorLoc, _gainLoc;
@@ -136,7 +147,7 @@ public sealed class GpuFft : IFft
         settings ??= new FftSettings();
         var n = settings.Size;
         if ((n & (n - 1)) != 0) throw new ArgumentException("Size must be a power of two", nameof(settings));
-        if (n > 2048) throw new ArgumentException("Size must be <= 2048 (single-workgroup limit)", nameof(settings));
+        if (n > 8192) throw new ArgumentException("Size must be <= 8192 (single-workgroup limit)", nameof(settings));
         N = n;
         _attack = settings.Attack;
         _decay = settings.Decay;
@@ -171,8 +182,21 @@ public sealed class GpuFft : IFft
 
         _cpuInL = new float[N];
         _cpuInR = new float[N];
-        _rawOutL = new float[Bins];
-        _rawOutR = new float[Bins];
+        _rawOutL = new float[N / 2];
+        _rawOutR = new float[N / 2];
+
+        if (settings.Scale != FrequencyScale.Linear)
+        {
+            _bucketing = new FrequencyBucketing(settings.Scale, N / 2, N / 2, settings.SampleRate);
+            Bins = _bucketing.BucketCount;
+            _bucketedL = new float[Bins];
+            _bucketedR = new float[Bins];
+        }
+        else
+        {
+            Bins = N / 2;
+        }
+
         _smoothL = new float[Bins];
         _smoothR = new float[Bins];
 
@@ -212,7 +236,8 @@ public sealed class GpuFft : IFft
     }
 
     public int N { get; }
-    public int Bins => N / 2;
+    /// <summary>Length of the arrays <see cref="Process" /> returns -- N/2 raw bins, or <see cref="FrequencyBucketing.BucketCount" /> when a perceptual scale is active.</summary>
+    public int Bins { get; }
 
     public void Dispose()
     {
@@ -265,8 +290,19 @@ public sealed class GpuFft : IFft
         GL.GetBufferSubData(BufferTarget.ShaderStorageBuffer, IntPtr.Zero, _rawOutR.Length * sizeof(float), _rawOutR);
         GL.BindBuffer(BufferTarget.ShaderStorageBuffer, 0);
 
-        ApplyGravity(_rawOutL, _smoothL);
-        ApplyGravity(_rawOutR, _smoothR);
+        if (_bucketing != null)
+        {
+            _bucketing.Apply(_rawOutL, _bucketedL!);
+            _bucketing.Apply(_rawOutR, _bucketedR!);
+            ApplyGravity(_bucketedL!, _smoothL);
+            ApplyGravity(_bucketedR!, _smoothR);
+        }
+        else
+        {
+            ApplyGravity(_rawOutL, _smoothL);
+            ApplyGravity(_rawOutR, _smoothR);
+        }
+
         return (_smoothL, _smoothR);
     }
 

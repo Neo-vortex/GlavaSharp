@@ -25,11 +25,22 @@ public sealed class CpuFft : IFft
 
     private readonly float[] _hann;
 
+    // Raw, linearly-spaced per-bin magnitude (length N/2, always -- the raw
+    // FFT output resolution, independent of whether/how it's bucketed).
     private readonly float[] _rawOutL, _rawOutR;
 
     // output needs this correction on top of the usual /N.
     private readonly float[] _reL, _imL, _reR, _imR; // working buffers, in-place FFT
-    private readonly float[] _smoothL, _smoothR; // gravity-smoothed, mirrors glava's gravity/avg transforms
+
+    // Perceptual bucketing (see FrequencyBucketing), null for FrequencyScale.Linear
+    // -- in which case _rawOutL/_rawOutR feed ApplyGravity directly instead.
+    private readonly FrequencyBucketing? _bucketing;
+
+    // Bucketed-but-not-yet-gravity-smoothed scratch (length Bins), only
+    // allocated/used when _bucketing is non-null.
+    private readonly float[]? _bucketedL, _bucketedR;
+
+    private readonly float[] _smoothL, _smoothR; // gravity-smoothed, mirrors glava's gravity/avg transforms; length Bins
     private readonly float _windowGain; // mean of _hann; Hann halves average amplitude, so raw FFT
 
     public CpuFft(FftSettings? settings = null)
@@ -53,8 +64,21 @@ public sealed class CpuFft : IFft
         _imL = new float[N];
         _reR = new float[N];
         _imR = new float[N];
-        _rawOutL = new float[Bins];
-        _rawOutR = new float[Bins];
+        _rawOutL = new float[N / 2];
+        _rawOutR = new float[N / 2];
+
+        if (settings.Scale != FrequencyScale.Linear)
+        {
+            _bucketing = new FrequencyBucketing(settings.Scale, N / 2, N / 2, settings.SampleRate);
+            Bins = _bucketing.BucketCount;
+            _bucketedL = new float[Bins];
+            _bucketedR = new float[Bins];
+        }
+        else
+        {
+            Bins = N / 2;
+        }
+
         _smoothL = new float[Bins];
         _smoothR = new float[Bins];
 
@@ -86,7 +110,9 @@ public sealed class CpuFft : IFft
     }
 
     public int N { get; }
-    public int Bins => N / 2;
+
+    /// <summary>Length of the arrays <see cref="Process" /> returns -- N/2 raw bins, or <see cref="FrequencyBucketing.BucketCount" /> when a perceptual scale is active.</summary>
+    public int Bins { get; }
 
     public void Dispose()
     {
@@ -95,8 +121,10 @@ public sealed class CpuFft : IFft
 
     /// <summary>
     ///     Runs one FFT for interleaved stereo PCM (length &gt;= N*2), windows
-    ///     it, and returns smoothed magnitude spectra (length Bins each, values
-    ///     roughly in [0,1]) for left/right.
+    ///     it, perceptually rebuckets the raw N/2-bin spectrum if
+    ///     <see cref="FftSettings.Scale" /> isn't <see cref="FrequencyScale.Linear" />,
+    ///     and returns smoothed magnitude spectra (length <see cref="Bins" />
+    ///     each, values roughly in [0,1]) for left/right.
     /// </summary>
     public (float[] left, float[] right) Process(ReadOnlySpan<float> interleavedStereo)
     {
@@ -120,7 +148,7 @@ public sealed class CpuFft : IFft
         Transform(_reR, _imR);
 
         var norm = 2f / (N * _windowGain); // single-sided spectrum x2, corrected for Hann's ~0.5 mean gain
-        for (var i = 0; i < Bins; i++)
+        for (var i = 0; i < _rawOutL.Length; i++)
         {
             var magL = MathF.Sqrt(_reL[i] * _reL[i] + _imL[i] * _imL[i]) * norm;
             var magR = MathF.Sqrt(_reR[i] * _reR[i] + _imR[i] * _imR[i]) * norm;
@@ -128,8 +156,19 @@ public sealed class CpuFft : IFft
             _rawOutR[i] = Math.Clamp(MathF.Log(1f + magR * _gain) / MathF.Log(1f + _gain), 0f, 1f);
         }
 
-        ApplyGravity(_rawOutL, _smoothL);
-        ApplyGravity(_rawOutR, _smoothR);
+        if (_bucketing != null)
+        {
+            _bucketing.Apply(_rawOutL, _bucketedL!);
+            _bucketing.Apply(_rawOutR, _bucketedR!);
+            ApplyGravity(_bucketedL!, _smoothL);
+            ApplyGravity(_bucketedR!, _smoothR);
+        }
+        else
+        {
+            ApplyGravity(_rawOutL, _smoothL);
+            ApplyGravity(_rawOutR, _smoothR);
+        }
+
         return (_smoothL, _smoothR);
     }
 

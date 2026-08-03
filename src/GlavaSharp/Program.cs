@@ -41,6 +41,16 @@ using GLFWBind = OpenTK.Windowing.GraphicsLibraryFramework.GLFW;
 //                           --fft-size at 2048 -- single workgroup).
 //                           The GPU FFT runs on whichever GPU got
 //                           selected via --gpu below.
+// --freq-scale <name>        perceptual frequency scale raw FFT bins get
+//                           bucketed into before any shader sees them:
+//                           "log2" (default, octave spacing), "mel",
+//                           "bark", "erb", or "linear" (no bucketing --
+//                           GlavaSharp's original raw-bin behavior, left
+//                           to each module's own smooth.glsl warp). Fixes
+//                           bass reading as static/underused and treble as
+//                           disproportionately "active" with raw linear
+//                           bins, where most musical energy is crammed
+//                           into a handful of the lowest bins.
 // --desktop                  GLava's `-d` / `setxwintype "desktop"`: render
 //                           pinned behind desktop icons via X11 EWMH hints
 //                           instead of a normal top-level window. X11 only
@@ -291,17 +301,46 @@ var sampleRate = GetArgIntValue(args, "--sample-rate") ?? rc.SampleRate;
 var fftAttack = GetArgFloatValue(args, "--fft-attack") ?? 0.6f;
 var fftDecay = GetArgFloatValue(args, "--fft-decay") ?? 0.08f;
 var fftGain = GetArgFloatValue(args, "--fft-gain") ?? 40.0f;
+
+var freqScaleArg = GetArgValue(args, "--freq-scale") ?? "log2";
+FrequencyScale freqScale;
+switch (freqScaleArg.Trim().ToLowerInvariant())
+{
+    case "linear":
+        freqScale = FrequencyScale.Linear;
+        break;
+    case "log2":
+        freqScale = FrequencyScale.Log2;
+        break;
+    case "mel":
+        freqScale = FrequencyScale.Mel;
+        break;
+    case "bark":
+        freqScale = FrequencyScale.Bark;
+        break;
+    case "erb":
+        freqScale = FrequencyScale.Erb;
+        break;
+    default:
+        Console.Error.WriteLine(
+            $"--freq-scale must be \"linear\", \"log2\", \"mel\", \"bark\", or \"erb\", got \"{freqScaleArg}\".");
+        return;
+}
+
 var fftSettings = new FftSettings
 {
     Size = fftSize,
     Attack = fftAttack,
     Decay = fftDecay,
     Gain = fftGain,
+    SampleRate = sampleRate,
+    Scale = freqScale,
     Device = fftDevice
 };
 Console.WriteLine($"[GlavaSharp] FFT: device={fftDevice.ToString().ToLowerInvariant()}, " +
                   $"size={fftSize} (bins={fftSize / 2}), " +
-                  $"attack={fftAttack}, decay={fftDecay}, gain={fftGain}, sampleRate={sampleRate}");
+                  $"attack={fftAttack}, decay={fftDecay}, gain={fftGain}, sampleRate={sampleRate}, " +
+                  $"freq-scale={freqScale.ToString().ToLowerInvariant()}");
 
 using var audio = new PipeWireAudioSource(sampleRate, targetId: targetId);
 audio.Start();

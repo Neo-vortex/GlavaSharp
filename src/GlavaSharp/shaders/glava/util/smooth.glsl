@@ -10,8 +10,22 @@
 #define maximum 1
 #define hybrid 2
 
+/* _FREQ_PREBUCKETED is a GlavaSharp-original macro (like _USE_ALPHA),
+   injected by Shaders/ShaderModule.cs when FftSettings.Scale (see
+   Shaders/FrequencyBucketing.cs) isn't FrequencyScale.Linear. In that case
+   the raw FFT spectrum has already been redistributed onto the chosen
+   perceptual scale (log2/mel/bark/erb) before it ever reaches this
+   texture -- bin index already *is* a perceptually-spaced position, so this
+   function's own log warp on top would skew the spectrum a second time.
+   Kept as an explicit #if (default 0, i.e. today's exact GLava-derived
+   behavior) rather than deleting the warp outright, since --freq-scale
+   linear still needs it. */
 float scale_audio(float idx) {
+    #if _FREQ_PREBUCKETED
+    return idx;
+    #else
     return -log((-(SAMPLE_RANGE) * idx) + 1) / (SAMPLE_SCALE);
+    #endif
 }
 
 float iscale_audio(float idx) {
