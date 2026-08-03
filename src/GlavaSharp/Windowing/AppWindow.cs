@@ -151,6 +151,9 @@ public sealed unsafe class AppWindow : IDisposable
         var geomY = options.DesktopY ?? 0;
         var geomW = options.DesktopWidth ?? 0;
         var geomH = options.DesktopHeight ?? 0;
+
+        if (options.DesktopMonitorIndex is { } monitorIndex)
+            (geomX, geomY, geomW, geomH) = ResolveMonitorRect(monitorIndex);
         _desktopModeHandle = X11Native.x11shim_desktop_mode_start(xid, geomX, geomY, geomW, geomH);
         if (_desktopModeHandle == IntPtr.Zero)
             Console.Error.WriteLine(
@@ -164,6 +167,32 @@ public sealed unsafe class AppWindow : IDisposable
             Console.WriteLine(
                 "[GlavaSharp] Desktop mode enabled (X11 EWMH: _NET_WM_WINDOW_TYPE_DESKTOP, " +
                 "below+sticky, auto-relower on stacking changes), covering the whole screen.");
+    }
+
+    /// <summary>
+    ///     Resolves --desktop-monitor's index into a concrete (x, y, width,
+    ///     height) rect via GLFW's cross-platform monitor API (backed by
+    ///     RandR on X11) -- same data --list-monitors prints. Done here
+    ///     rather than in Program.cs because monitor enumeration needs GLFW
+    ///     already initialized, which only happens once AppWindow's
+    ///     constructor gets this far.
+    /// </summary>
+    private unsafe (int X, int Y, int Width, int Height) ResolveMonitorRect(int index)
+    {
+        var monitors = GLFWBind.GetMonitors();
+        if (index < 0 || index >= monitors.Length)
+            throw new InvalidOperationException(
+                $"--desktop-monitor {index} is out of range -- {monitors.Length} monitor(s) detected " +
+                "(run --list-monitors to see indices).");
+
+        var monitor = monitors[index];
+        GLFWBind.GetMonitorPos(monitor, out var mx, out var my);
+        var mode = GLFWBind.GetVideoMode(monitor);
+        if (mode is null)
+            throw new InvalidOperationException(
+                $"--desktop-monitor {index}: GLFW couldn't read that monitor's video mode.");
+
+        return (mx, my, mode->Width, mode->Height);
     }
 
     private static void LogSelectedPlatform()

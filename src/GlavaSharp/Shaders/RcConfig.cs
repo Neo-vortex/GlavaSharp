@@ -44,11 +44,15 @@ public sealed class RcConfig
     public bool Desktop { get; private set; }
 
     /// <summary>
-    ///     GLava's `setgeometry`'s x/y (window position) — unlike
-    ///     <see cref="Width" />/<see cref="Height" />, GlavaSharp previously
-    ///     parsed but discarded these. Used as the default desktop-mode
-    ///     placement (see <see cref="Windowing.WindowOptions.DesktopX" />)
-    ///     when `--desktop-geometry` isn't passed; only meaningful when
+    ///     GLava's `setgeometry`'s x/y (window position) — parsed for
+    ///     completeness (previously silently discarded) but not currently
+    ///     consumed anywhere: <see cref="Windowing.WindowOptions" /> has no
+    ///     normal-window positioning, and desktop mode deliberately does
+    ///     NOT fall back to this (see the comment in Program.cs) since
+    ///     GLava's stock rc.glsl ships a `setgeometry` line unconditionally
+    ///     as the default *windowed*-mode size, which isn't the same thing
+    ///     as "the user wants desktop mode constrained to this rect" — only
+    ///     an explicit `--desktop-geometry` does that. Only meaningful when
     ///     <see cref="HasGeometry" /> is true.
     /// </summary>
     public int GeomX { get; private set; }

@@ -196,13 +196,40 @@ listed here, it's a real bug — please file an issue with the
 - [x] **Desktop-mode geometry control** (`--desktop-geometry X,Y,W,H`,
       GLava's `setgeometry` equivalent for `-d`). Previously the window
       always covered the whole screen; `RcConfig` was already parsing
-      `setgeometry`'s width/height but silently discarding x/y. Now both
-      the CLI flag and rc.glsl's own `setgeometry` (when `--desktop` is
-      set and `--desktop-geometry` isn't passed) can place/size the
-      desktop-mode window at an exact rect instead. Verified live:
-      `--desktop --desktop-geometry 200,150,900,500` produced a window at
-      exactly `900x500+200+150` (confirmed via `xwininfo`), rendering
-      correctly and staying transparent/click-through at that size.
+      `setgeometry`'s width/height but silently discarding x/y. Now the
+      CLI flag can place/size the desktop-mode window at an exact rect
+      instead. Verified live: `--desktop --desktop-geometry
+      200,150,900,500` produced a window at exactly `900x500+200+150`
+      (confirmed via `xwininfo`), rendering correctly and staying
+      transparent/click-through at that size.
+  - [x] **Bug found and fixed: desktop mode wasn't actually fullscreen by
+        default.** The first version of this feature also fell back to
+        rc.glsl's own `setgeometry` (x/y/width/height) whenever
+        `--desktop-geometry` wasn't passed. That was wrong: GLava's *stock*
+        `rc.glsl` ships `#request setgeometry 0 0 800 600` unconditionally
+        as the default *windowed*-mode size, so "rc.glsl has a
+        `setgeometry` line" is true for nearly every rc.glsl, not just ones
+        where the user actually wants desktop mode constrained. Result:
+        `--desktop` alone silently shrank to an 800x600 box instead of
+        covering the screen, on any unmodified rc.glsl. Fixed by removing
+        the rc.glsl fallback entirely — only an explicit
+        `--desktop-geometry` (or `--desktop-monitor`, below) constrains
+        desktop mode now; no flag means "cover the whole screen," always.
+        Verified live: same window went from `800x600+0+0` to the full
+        `3286x1080+0+0` virtual screen after the fix.
+- [x] **Per-monitor desktop mode** (`--desktop-monitor <index>`,
+      `--list-monitors`). `--desktop-geometry` needs the user to already
+      know pixel coordinates; `--desktop-monitor N` covers exactly monitor
+      `N`'s rect instead, resolved via GLFW's own cross-platform monitor
+      API (`GetMonitors`/`GetMonitorPos`/`GetVideoMode` — the same RandR
+      data `--list-monitors` prints), not new X11 code. Resolved inside
+      `AppWindow` rather than `Program.cs`, since monitor enumeration needs
+      GLFW already initialized. Mutually exclusive with
+      `--desktop-geometry`. Verified live on a real two-monitor setup:
+      `--desktop-monitor 0` (a `1920x1080 at (1366,0)` monitor, confirmed
+      via `--list-monitors`) produced a window at exactly
+      `1920x1080+1366+0`, rendering only on that monitor — the other
+      monitor's wallpaper was completely untouched.
 - [ ] **GNOME** — Mutter doesn't honor `_NET_WM_WINDOW_TYPE_DESKTOP`
       stacking the way xfwm4 does, so this likely needs its own approach
       rather than reusing `x11shim`'s as-is. Not started.
@@ -540,9 +567,12 @@ actual EWMH work on its own connection to the X server:
   via `#request addxwinstate`, which GlavaSharp's `RcConfig` now actually
   reads)
 - strips decorations via `_MOTIF_WM_HINTS`
-- positions/sizes the window — the whole screen by default, or an exact
-  rect when the caller passes one (`--desktop-geometry` / rc.glsl's
-  `setgeometry`, GLava's equivalent for desktop mode)
+- positions/sizes the window — the whole (multi-monitor) virtual screen by
+  default, or an exact rect when the caller passes one, via either
+  `--desktop-geometry X,Y,W,H` (exact pixels) or `--desktop-monitor
+  <index>` (resolved from GLFW's monitor list — see
+  [Status](#status--roadmap) for why rc.glsl's own `setgeometry` is
+  deliberately *not* used as an implicit fallback here)
 - restacks it below xfdesktop's own window when it can find one (matched
   by `WM_CLASS`, via the SHAPE extension's underlying `query_tree`-walked
   top-level/frame window; see `find_desktop_owner_toplevel`/
@@ -573,8 +603,10 @@ flag; `AppWindow` fails loudly (not silently) if GLFW doesn't actually end
 up on X11. It's also settable from `rc.glsl` via GLava's own
 `#request setxwintype "desktop"` directive — `--desktop` on the CLI and
 `setxwintype "desktop"` in `rc.glsl` both work, CLI wins if both differ.
-Same CLI-wins-over-rc.glsl precedence applies to
-`--desktop-geometry`/`setgeometry`.
+Geometry works differently: only `--desktop-geometry`/`--desktop-monitor`
+constrain desktop mode's rect — rc.glsl's `setgeometry` is deliberately
+*not* consulted for this (see [Status](#status--roadmap) for the bug that
+caused, when it was).
 
 Currently targets xfwm4 (XFCE) first, since it's one of the more
 EWMH-compliant window managers for this particular behavior — hence why

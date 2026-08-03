@@ -52,4 +52,17 @@ public sealed class WindowOptions
 
     /// <summary>See <see cref="DesktopX" />.</summary>
     public int? DesktopHeight { get; init; }
+
+    /// <summary>
+    ///     Desktop mode, pinned to a specific monitor instead of an exact
+    ///     rect or the whole (multi-monitor) virtual screen -- index matches
+    ///     `--list-monitors`. Mutually exclusive with
+    ///     <see cref="DesktopX" />/Y/Width/Height (Program.cs rejects passing
+    ///     both `--desktop-geometry` and `--desktop-monitor`); resolved to a
+    ///     concrete rect in <see cref="AppWindow" /> once GLFW's monitor list
+    ///     is available (Program.cs runs before GLFW is initialized, so it
+    ///     can't resolve this itself). Ignored when <see cref="DesktopMode" />
+    ///     is false.
+    /// </summary>
+    public int? DesktopMonitorIndex { get; init; }
 }

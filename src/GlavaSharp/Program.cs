@@ -2,6 +2,7 @@ using GlavaSharp;
 using GlavaSharp.Audio;
 using GlavaSharp.Shaders;
 using GlavaSharp.Windowing;
+using GLFWBind = OpenTK.Windowing.GraphicsLibraryFramework.GLFW;
 
 // --- CLI ---------------------------------------------------------------
 // --list-sinks              enumerate PipeWire capture targets and exit
@@ -54,6 +55,54 @@ using GlavaSharp.Windowing;
 //                           `setgeometry` (if present) when --desktop is
 //                           set and this flag isn't; only applies with
 //                           --desktop / setxwintype "desktop".
+// --list-monitors             enumerate connected monitors (index, name,
+//                           position, resolution) and exit.
+// --desktop-monitor <index>  desktop mode covers exactly this monitor
+//                           (index from --list-monitors) instead of the
+//                           whole virtual screen. Mutually exclusive with
+//                           --desktop-geometry; only applies with
+//                           --desktop / setxwintype "desktop".
+if (args.Contains("--list-monitors"))
+{
+    if (!GLFWBind.Init())
+    {
+        Console.Error.WriteLine("GLFW initialization failed -- can't enumerate monitors.");
+        return;
+    }
+
+    try
+    {
+        unsafe
+        {
+            var monitors = GLFWBind.GetMonitors();
+            if (monitors.Length == 0)
+            {
+                Console.WriteLine("No monitors found.");
+            }
+            else
+            {
+                Console.WriteLine("Available monitors (use --desktop-monitor <index>):");
+                for (var mi = 0; mi < monitors.Length; mi++)
+                {
+                    var mon = monitors[mi];
+                    GLFWBind.GetMonitorPos(mon, out var mx, out var my);
+                    var mode = GLFWBind.GetVideoMode(mon);
+                    var name = GLFWBind.GetMonitorName(mon);
+                    Console.WriteLine(mode is null
+                        ? $"  [{mi}] {name} @ ({mx},{my})"
+                        : $"  [{mi}] {name}  {mode->Width}x{mode->Height}  at ({mx},{my})");
+                }
+            }
+        }
+    }
+    finally
+    {
+        GLFWBind.Terminate();
+    }
+
+    return;
+}
+
 if (args.Contains("--list-gpus"))
 {
     var gpus = GpuEnumerator.List();
@@ -162,10 +211,15 @@ var rc = File.Exists(rcPath) ? RcConfig.Load(rcPath) : new RcConfig();
 var moduleName = GetArgValue(args, "--module") ?? rc.Module;
 var desktopMode = args.Contains("--desktop") || rc.Desktop;
 
-// --desktop-geometry wins if passed; otherwise rc.glsl's own setgeometry
-// (already parsed into rc.GeomX/Y/Width/Height) applies when desktop mode
-// is active, since GLava lets setgeometry position desktop-embedded
-// windows too, not just normal ones. Null all around means "cover the
+// Only an explicit --desktop-geometry constrains desktop mode -- rc.glsl's
+// own setgeometry is deliberately NOT used as a fallback here, even though
+// RcConfig parses it (rc.GeomX/Y + Width/Height): GLava's stock rc.glsl
+// ships `#request setgeometry 0 0 800 600` unconditionally as the default
+// *windowed*-mode size, so treating "rc.glsl has a setgeometry line" as
+// "the user wants desktop mode constrained to that rect" made --desktop
+// silently shrink to 800x600 on literally every rc.glsl that hadn't been
+// hand-edited to remove it -- the opposite of --desktop's own "cover the
+// whole screen by default" contract. Null all around means "cover the
 // whole screen" -- x11shim's own default.
 int? desktopX = null, desktopY = null, desktopWidth = null, desktopHeight = null;
 var desktopGeomArg = GetArgValue(args, "--desktop-geometry");
@@ -184,9 +238,24 @@ if (desktopGeomArg is not null)
 
     (desktopX, desktopY, desktopWidth, desktopHeight) = (gx, gy, gw, gh);
 }
-else if (desktopMode && rc.HasGeometry)
+
+int? desktopMonitorIndex = null;
+var desktopMonitorArg = GetArgValue(args, "--desktop-monitor");
+if (desktopMonitorArg is not null)
 {
-    (desktopX, desktopY, desktopWidth, desktopHeight) = (rc.GeomX, rc.GeomY, rc.Width, rc.Height);
+    if (desktopGeomArg is not null)
+    {
+        Console.Error.WriteLine("--desktop-monitor and --desktop-geometry are mutually exclusive -- pick one.");
+        return;
+    }
+
+    if (!int.TryParse(desktopMonitorArg, out var monIdx) || monIdx < 0)
+    {
+        Console.Error.WriteLine($"--desktop-monitor must be a non-negative index, got \"{desktopMonitorArg}\".");
+        return;
+    }
+
+    desktopMonitorIndex = monIdx;
 }
 
 var fftSize = GetArgIntValue(args, "--fft-size") ?? NextPowerOfTwo(rc.BufSize);
@@ -262,7 +331,8 @@ var options = new WindowOptions
     DesktopX = desktopX,
     DesktopY = desktopY,
     DesktopWidth = desktopWidth,
-    DesktopHeight = desktopHeight
+    DesktopHeight = desktopHeight,
+    DesktopMonitorIndex = desktopMonitorIndex
 };
 
 using var window = new AppWindow(options, audio, shaderRootDir, moduleName, fftSettings);
