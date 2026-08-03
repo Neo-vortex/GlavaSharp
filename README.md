@@ -41,9 +41,11 @@ detailed build notes, see **[TECHNICAL.md](TECHNICAL.md)**.
   is actually running).
 - **Desktop-embedded mode** (`--desktop`, GLava's `-d` equivalent) —
   renders pinned behind desktop icons via X11 EWMH hints, transparent and
-  click-through, with adjustable position/size (`--desktop-geometry`).
-  Verified working on XFCE/xfwm4; GNOME and native Wayland aren't
-  implemented yet.
+  click-through. Covers the whole (multi-monitor) screen by default;
+  `--desktop-geometry X,Y,W,H` or `--desktop-monitor <index>`
+  (`--list-monitors` to see indices) constrain it to an exact rect or a
+  single monitor. Verified working on XFCE/xfwm4; GNOME and native
+  Wayland aren't implemented yet.
 - GPU picker for hybrid-graphics laptops (`--list-gpus` / `--gpu <n>`).
 - Ships as a single self-contained Native AOT executable — no installed
   runtime, no sibling `.so` files to lose track of.
@@ -82,7 +84,9 @@ run the app end-to-end.
 ./build/dist/GlavaSharp --list-sinks       # see capture targets
 ./build/dist/GlavaSharp --list-gpus        # see DRM render nodes (for --gpu)
 ./build/dist/GlavaSharp --fft-device gpu   # run the FFT on the GPU instead of the CPU
-./build/dist/GlavaSharp --desktop          # desktop-embedded mode (X11/xfwm4)
+./build/dist/GlavaSharp --desktop          # desktop-embedded mode (X11/xfwm4), whole screen
+./build/dist/GlavaSharp --list-monitors    # see connected monitors (for --desktop-monitor)
+./build/dist/GlavaSharp --desktop --desktop-monitor 1                  # ...on just monitor 1
 ./build/dist/GlavaSharp --desktop --desktop-geometry 100,100,800,600   # ...at a specific rect
 ```
 
