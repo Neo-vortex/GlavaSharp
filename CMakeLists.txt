@@ -95,6 +95,32 @@ if (NOT DEFINED GLAVASHARP_CONFIGURATION)
     set(GLAVASHARP_CONFIGURATION "Release")
 endif ()
 
+# Off by default: Native AOT (ILC) compiles Avx2.IsSupported/Fma.IsSupported
+# in Shaders/CpuFft.cs to a hardcoded `false` unless the target instruction
+# set is explicitly widened past its conservative SSE2 baseline -- see
+# TECHNICAL.md's Benchmarks section for the measured speedup (1.2x-1.6x)
+# and, more importantly, why this isn't a free upgrade: turning it on makes
+# ILC bake AVX2+FMA in as a hard *requirement* rather than a runtime-checked
+# option, deleting CpuFft's scalar fallback from the compiled output and
+# making the resulting binary refuse to start (fail-fast, occasionally a
+# raw illegal-instruction crash) on any CPU that turns out not to have
+# AVX2+FMA. Only turn this on if you know every machine that will actually
+# run the resulting build has both -- the `appimage` target names its output
+# GlavaSharp-x86_64-avx2.AppImage instead of the plain name specifically so
+# this can't be handed out/mistaken for the portable build by accident.
+#
+# Usage: cmake -S . -B build -DGLAVASHARP_AVX2_CPU_FFT=ON
+option(GLAVASHARP_AVX2_CPU_FFT
+        "Require AVX2+FMA for the Native AOT build's CpuFft (faster, but the binary won't run on CPUs without AVX2+FMA)"
+        OFF)
+if (GLAVASHARP_AVX2_CPU_FFT)
+    message(WARNING
+            "GLAVASHARP_AVX2_CPU_FFT is ON: the published binary will require "
+            "AVX2+FMA and refuse to start (or crash) on CPUs without them. "
+            "This is a portability/speed tradeoff, not a strict upgrade -- see "
+            "TECHNICAL.md's Benchmarks section.")
+endif ()
+
 # Repo layout:
 #   src/GlavaSharp/    the .NET project (csproj + all C# sources)
 #   native/pwshim/      the Rust PipeWire capture shim (separate, not nested
@@ -152,12 +178,26 @@ add_custom_target(x11shim ALL
 # timestamp. dotnet's own caching keeps a no-op publish reasonably fast.
 # ------------------------------------------------------------------------
 
+set(GLAVASHARP_PUBLISH_ARGS -p:PublishAot=true)
+if (GLAVASHARP_AVX2_CPU_FFT)
+    # "avx2" alone is enough -- ILC's x64 instruction-set table bundles FMA
+    # into it (every real AVX2 CPU has had FMA since Haswell), confirmed by
+    # checking CpuFft.UsingAvx2 (Avx2.IsSupported && Fma.IsSupported) on the
+    # resulting binary. A literal "avx2,fma" is REJECTED by ILC -- "fma"
+    # isn't a standalone --instruction-set token in this SDK (`ilc --help`
+    # lists the valid x64 set; there's no bare "fma" entry) -- and the comma
+    # inside "-p:...=avx2,fma" additionally trips an MSBuild command-line
+    # parsing quirk (MSB1006 "Property is not valid") if you do add a second
+    # value, so don't add one without quoting the whole property value.
+    list(APPEND GLAVASHARP_PUBLISH_ARGS -p:IlcInstructionSet=avx2)
+endif ()
+
 add_custom_target(glavasharp ALL
         COMMAND ${DOTNET_EXECUTABLE} publish ${DOTNET_PROJECT}
         -c ${GLAVASHARP_CONFIGURATION}
         -r ${GLAVASHARP_RID}
         --self-contained true
-        -p:PublishAot=true
+        ${GLAVASHARP_PUBLISH_ARGS}
         -o ${PUBLISH_DIR}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         BYPRODUCTS ${FINAL_EXECUTABLE}
@@ -175,6 +215,13 @@ install(PROGRAMS ${FINAL_EXECUTABLE} DESTINATION bin)
 add_custom_command(TARGET glavasharp POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E echo "Built: ${FINAL_EXECUTABLE}"
 )
+if (GLAVASHARP_AVX2_CPU_FFT)
+    add_custom_command(TARGET glavasharp POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo
+            "  requires AVX2+FMA at runtime -- GLAVASHARP_AVX2_CPU_FFT=ON"
+            VERBATIM
+    )
+endif ()
 
 # ------------------------------------------------------------------------
 # `clean-all` — CMake's built-in `clean` target only removes files it knows
@@ -215,8 +262,19 @@ add_custom_target(clean-all
 # Usage: cmake --build build --target appimage
 # ------------------------------------------------------------------------
 
+# --avx2-cpu-fft here only changes the *output filename*
+# (GlavaSharp-x86_64-avx2.AppImage vs GlavaSharp-x86_64.AppImage) -- by the
+# time this script runs, build/dist/ already reflects whatever
+# GLAVASHARP_AVX2_CPU_FFT built above, so the script isn't rebuilding
+# anything differently, just making sure the AVX2-requiring artifact can't
+# be mistaken for (or overwrite) the portable one on disk.
+set(GLAVASHARP_APPIMAGE_ARGS "")
+if (GLAVASHARP_AVX2_CPU_FFT)
+    set(GLAVASHARP_APPIMAGE_ARGS --avx2-cpu-fft)
+endif ()
+
 add_custom_target(appimage
-        COMMAND ${CMAKE_SOURCE_DIR}/packaging/build-appimage.sh
+        COMMAND ${CMAKE_SOURCE_DIR}/packaging/build-appimage.sh ${GLAVASHARP_APPIMAGE_ARGS}
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMENT "Packing GlavaSharp into a single-file AppImage"
         VERBATIM

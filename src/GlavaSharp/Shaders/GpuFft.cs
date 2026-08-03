@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using OpenTK.Graphics.OpenGL;
 
 namespace GlavaSharp.Shaders;
@@ -18,99 +19,23 @@ namespace GlavaSharp.Shaders;
 ///     `shared` memory without ping-ponging buffers -- this caps N at 8192
 ///     (same limit <c>CpuFft</c> doesn't have, since it's not workgroup-bound,
 ///     but which matches the shared default of <see cref="FftSettings.Size" />).
+///     The actual GLSL lives in <c>shaders/fft/radix2.comp</c> (see
+///     <see cref="LoadKernelSource" />), not embedded here -- kept as its own
+///     file/directory, sibling to where a future alternative kernel (a
+///     different radix, a multi-workgroup approach not capped by
+///     GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS the way this one is, etc.) could
+///     go without touching this one.
 /// </summary>
 public sealed class GpuFft : IFft
 {
-    // Token substitution instead of a $$"""...""" interpolated raw string:
-    // GLSL is brace-heavy and relying on C#'s "N dollars => N braces starts
-    // interpolation" rule next to hand-written GLSL braces is easy to get
-    // subtly wrong. Token substitution keeps the GLSL body untouched by C#
-    // string-literal escaping rules entirely.
-    private const string SourceTemplate = """
-                                          #version 430
-                                          layout(local_size_x = __HALF__) in;
-
-                                          // Windowed, bit-reversed time-domain samples, precomputed on the CPU
-                                          // (same _hann/_bitRev tables as CpuFft) so the shader only has to do
-                                          // the butterfly stages, not windowing or bit-reversal.
-                                          layout(std430, binding = 0) buffer InL { float inL[]; };
-                                          layout(std430, binding = 1) buffer InR { float inR[]; };
-                                          layout(std430, binding = 2) buffer OutL { float outL[]; };
-                                          layout(std430, binding = 3) buffer OutR { float outR[]; };
-
-                                          shared vec2 shL[__N__];
-                                          shared vec2 shR[__N__];
-
-                                          const float PI = 3.14159265359;
-                                          const uint N = __N__u;
-                                          const uint HALF = __HALF__u;
-
-                                          // Deliberately uniforms, not compile-time consts: with LOGN baked in
-                                          // as a literal, Mesa's compute-shader compiler (iris/NIR on Intel)
-                                          // tries to fully unroll the stage loop and do scalar replacement on
-                                          // the two __N__-element `shared` arrays below, since every index into
-                                          // them is a per-invocation runtime value rather than a constant. That
-                                          // combination can make glCompileShader/glLinkProgram hang or take
-                                          // minutes on real hardware with no error reported. Keeping LOGN (and
-                                          // the tunables below) as uniforms forces the driver to keep this as a
-                                          // real loop instead.
-                                          uniform uint u_logN;
-                                          uniform float u_normFactor; // 2 / (N * hannWindowGain), matches CpuFft
-                                          uniform float u_gain;       // FftSettings.Gain (log-compression contrast)
-
-                                          vec2 cmul(vec2 a, vec2 b) { return vec2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); }
-
-                                          void main() {
-                                              uint tid = gl_LocalInvocationID.x; // 0 .. HALF-1
-
-                                              // inL/inR already windowed + bit-reversed on the CPU; imaginary
-                                              // part starts at zero, same as CpuFft's _imL/_imR.
-                                              shL[tid] = vec2(inL[tid], 0.0);
-                                              shL[tid + HALF] = vec2(inL[tid + HALF], 0.0);
-                                              shR[tid] = vec2(inR[tid], 0.0);
-                                              shR[tid + HALF] = vec2(inR[tid + HALF], 0.0);
-                                              barrier();
-
-                                              // In-place iterative DIT FFT, identical stage structure to
-                                              // CpuFft.Transform: for each of log2(N) stages, pair up elements
-                                              // `half` apart within blocks of `size`, apply the twiddle factor
-                                              // for this stage/position, and butterfly. Both channels share the
-                                              // same j/twiddle math, so they're done together in one loop --
-                                              // shL/shR are referenced directly (not passed through a function
-                                              // call) since `shared` arrays can't safely cross a GLSL function
-                                              // boundary by value/inout.
-                                              for (uint stage = 0u; stage < u_logN; stage++) {
-                                                  uint m = 1u << (stage + 1u);
-                                                  uint half_ = m >> 1;
-                                                  uint k = tid % half_;
-                                                  uint j = (tid / half_) * m + k;
-                                                  float angle = -2.0 * PI * float(k) / float(m);
-                                                  vec2 w = vec2(cos(angle), sin(angle));
-
-                                                  vec2 aL = shL[j];
-                                                  vec2 bL = cmul(w, shL[j + half_]);
-                                                  vec2 aR = shR[j];
-                                                  vec2 bR = cmul(w, shR[j + half_]);
-                                                  barrier();
-                                                  shL[j] = aL + bL;
-                                                  shL[j + half_] = aL - bL;
-                                                  shR[j] = aR + bR;
-                                                  shR[j + half_] = aR - bR;
-                                                  barrier();
-                                              }
-
-                                              // Only the first N/2 bins (single-sided spectrum) are meaningful;
-                                              // this workgroup has exactly HALF=N/2 invocations, so every
-                                              // invocation writes exactly one output bin -- same magnitude/log
-                                              // -compression formula as CpuFft.Process:
-                                              //   norm = 2 / (N * windowGain)
-                                              //   out  = clamp(log(1 + mag*gain) / log(1 + gain), 0, 1)
-                                              float magL = length(shL[tid]) * u_normFactor;
-                                              float magR = length(shR[tid]) * u_normFactor;
-                                              outL[tid] = clamp(log(1.0 + magL * u_gain) / log(1.0 + u_gain), 0.0, 1.0);
-                                              outR[tid] = clamp(log(1.0 + magR * u_gain) / log(1.0 + u_gain), 0.0, 1.0);
-                                          }
-                                          """;
+    // shaders/fft/radix2.comp, resolved the same way ShaderModule resolves
+    // shaders/glava/ -- relative to the published app's own directory, not
+    // the working directory, so it's found regardless of where GlavaSharp
+    // is actually launched from. Content-copied there by the .csproj's
+    // existing `<Content Include="shaders/**/*">` item, same mechanism the
+    // visualization modules already use -- no new build step needed.
+    private static readonly string KernelPath =
+        Path.Combine(AppContext.BaseDirectory, "shaders", "fft", "radix2.comp");
 
     // Same gravity smoothing as CpuFft.ApplyGravity, and sourced from the
     // same FftSettings (rather than hardcoded) so `--fft-attack`/`--fft-decay`
@@ -200,7 +125,7 @@ public sealed class GpuFft : IFft
         _smoothL = new float[Bins];
         _smoothR = new float[Bins];
 
-        _program = CompileCompute(BuildSource(N));
+        _program = CompileCompute(LoadKernelSource(N));
         _logNLoc = GL.GetUniformLocation(_program, "u_logN");
         _normFactorLoc = GL.GetUniformLocation(_program, "u_normFactor");
         _gainLoc = GL.GetUniformLocation(_program, "u_gain");
@@ -341,10 +266,24 @@ public sealed class GpuFft : IFft
         return program;
     }
 
-    private static string BuildSource(int n)
+    /// <summary>
+    ///     Reads <see cref="KernelPath" /> and substitutes __N__/__HALF__ --
+    ///     GLSL has no way to size a `shared` array or a workgroup from a
+    ///     uniform, both have to be compile-time constants, so this can't be
+    ///     a plain uniform the way u_logN/u_normFactor/u_gain are. Token
+    ///     substitution instead of e.g. a templating library: the kernel
+    ///     file is plain GLSL, no C#-string-literal escaping concerns to
+    ///     work around now that it's not embedded as a C# string at all.
+    /// </summary>
+    private static string LoadKernelSource(int n)
     {
+        if (!File.Exists(KernelPath))
+            throw new FileNotFoundException(
+                $"GPU FFT kernel not found: {KernelPath} (expected next to the published executable, " +
+                "same as the shaders/glava module tree).", KernelPath);
+
         var half = n / 2;
-        return SourceTemplate
+        return File.ReadAllText(KernelPath)
             .Replace("__N__", n.ToString())
             .Replace("__HALF__", half.ToString());
     }

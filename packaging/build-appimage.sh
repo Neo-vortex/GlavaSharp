@@ -10,17 +10,44 @@ set -euo pipefail
 # any of that linking -- it wraps the existing multi-file output into one
 # AppImage, the standard Linux single-file-distributable format.
 #
-# Usage: packaging/build-appimage.sh
+# Usage: packaging/build-appimage.sh [--avx2-cpu-fft]
 # Requires: build/dist/GlavaSharp already built (run the normal CMake build
-# first), mksquashfs (used internally by appimagetool), and network access
-# on first run only, to fetch appimagetool itself (cached afterwards).
+# first -- with -DGLAVASHARP_AVX2_CPU_FFT=ON first if passing --avx2-cpu-fft
+# here, see CMakeLists.txt), mksquashfs (used internally by appimagetool),
+# and network access on first run only, to fetch appimagetool itself
+# (cached afterwards).
+#
+# --avx2-cpu-fft only changes the OUTPUT FILENAME
+# (GlavaSharp-x86_64-avx2.AppImage instead of GlavaSharp-x86_64.AppImage) --
+# this script doesn't rebuild anything itself, it just mirrors whatever's
+# already in build/dist/. The distinct name exists so an AVX2+FMA-requiring
+# build (see TECHNICAL.md's Benchmarks section -- it refuses to start on
+# CPUs without both) can't be mistaken for, or silently overwrite, the
+# portable one on disk.
+
+AVX2_CPU_FFT=0
+for arg in "$@"; do
+    case "$arg" in
+        --avx2-cpu-fft) AVX2_CPU_FFT=1 ;;
+        *)
+            echo "error: unknown argument: $arg" >&2
+            exit 1
+            ;;
+    esac
+done
 
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
 DIST_DIR="$REPO_ROOT/build/dist"
 TOOLS_DIR="$REPO_ROOT/build/tools"
 APPDIR="$REPO_ROOT/build/AppDir"
-OUT="$REPO_ROOT/build/GlavaSharp-x86_64.AppImage"
+if [ "$AVX2_CPU_FFT" = 1 ]; then
+    OUT="$REPO_ROOT/build/GlavaSharp-x86_64-avx2.AppImage"
+    echo "warning: packing an AVX2+FMA-requiring build -- this AppImage will" >&2
+    echo "         refuse to start (or crash) on CPUs without AVX2+FMA." >&2
+else
+    OUT="$REPO_ROOT/build/GlavaSharp-x86_64.AppImage"
+fi
 APPIMAGETOOL="$TOOLS_DIR/appimagetool-x86_64.AppImage"
 
 if [ ! -x "$DIST_DIR/GlavaSharp" ]; then

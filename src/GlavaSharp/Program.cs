@@ -2,6 +2,8 @@ using GlavaSharp;
 using GlavaSharp.Audio;
 using GlavaSharp.Shaders;
 using GlavaSharp.Windowing;
+using OpenTK.Graphics.OpenGL;
+using OpenTK.Windowing.GraphicsLibraryFramework;
 using GLFWBind = OpenTK.Windowing.GraphicsLibraryFramework.GLFW;
 
 // --- CLI ---------------------------------------------------------------
@@ -72,11 +74,52 @@ using GLFWBind = OpenTK.Windowing.GraphicsLibraryFramework.GLFW;
 //                           whole virtual screen. Mutually exclusive with
 //                           --desktop-geometry; only applies with
 //                           --desktop / setxwintype "desktop".
+// --log-level <level>        minimum severity to print: "debug", "info"
+//                           (default), "warn", or "error". "debug" also
+//                           turns on the per-second FPS line and the
+//                           per-shader-pass compile chatter that's
+//                           otherwise silent.
+// --benchmark-fft             time IFft.Process() across a few window sizes
+//                           and exit -- no window, no visualization, just a
+//                           ms/call, calls/sec, checksum table on stdout.
+//                           Respects --fft-device cpu|gpu (GPU creates a
+//                           hidden, never-shown GL context just for this --
+//                           still no visible window) and --fft-attack/
+//                           -decay/-gain/--sample-rate; ignores --fft-size
+//                           itself (sweeps its own fixed list) and skips any
+//                           GPU size that would exceed this GPU's actual
+//                           compute workgroup limit rather than risk it. For
+//                           CpuFft, compare against the scalar fallback on
+//                           the same hardware with DOTNET_EnableAVX2=0 in
+//                           the environment (see TECHNICAL.md's Benchmarks
+//                           section for reference numbers).
+
+var logLevelArg = GetArgValue(args, "--log-level") ?? "info";
+switch (logLevelArg.Trim().ToLowerInvariant())
+{
+    case "debug":
+        Log.MinLevel = LogLevel.Debug;
+        break;
+    case "info":
+        Log.MinLevel = LogLevel.Info;
+        break;
+    case "warn":
+        Log.MinLevel = LogLevel.Warn;
+        break;
+    case "error":
+        Log.MinLevel = LogLevel.Error;
+        break;
+    default:
+        Log.Error(
+            $"--log-level must be \"debug\", \"info\", \"warn\", or \"error\", got \"{logLevelArg}\".");
+        return;
+}
+
 if (args.Contains("--list-monitors"))
 {
     if (!GLFWBind.Init())
     {
-        Console.Error.WriteLine("GLFW initialization failed -- can't enumerate monitors.");
+        Log.Error("GLFW initialization failed -- can't enumerate monitors.");
         return;
     }
 
@@ -87,18 +130,18 @@ if (args.Contains("--list-monitors"))
             var monitors = GLFWBind.GetMonitors();
             if (monitors.Length == 0)
             {
-                Console.WriteLine("No monitors found.");
+                Log.Info("No monitors found.");
             }
             else
             {
-                Console.WriteLine("Available monitors (use --desktop-monitor <index>):");
+                Log.Info("Available monitors (use --desktop-monitor <index>):");
                 for (var mi = 0; mi < monitors.Length; mi++)
                 {
                     var mon = monitors[mi];
                     GLFWBind.GetMonitorPos(mon, out var mx, out var my);
                     var mode = GLFWBind.GetVideoMode(mon);
                     var name = GLFWBind.GetMonitorName(mon);
-                    Console.WriteLine(mode is null
+                    Log.Info(mode is null
                         ? $"  [{mi}] {name} @ ({mx},{my})"
                         : $"  [{mi}] {name}  {mode->Width}x{mode->Height}  at ({mx},{my})");
                 }
@@ -118,17 +161,24 @@ if (args.Contains("--list-gpus"))
     var gpus = GpuEnumerator.List();
     if (gpus.Count == 0)
     {
-        Console.WriteLine("No GPUs found via /sys/class/drm or lspci.");
+        Log.Info("No GPUs found via /sys/class/drm or lspci.");
     }
     else
     {
-        Console.WriteLine("Available GPUs (use --gpu <index>):");
+        Log.Info("Available GPUs (use --gpu <index>):");
         for (var gi = 0; gi < gpus.Count; gi++)
-            Console.WriteLine($"  [{gi}] {gpus[gi]}");
+            Log.Info($"  [{gi}] {gpus[gi]}");
     }
 
     return;
 }
+
+// Checked here (early) but only acted on once FftSettings is fully parsed,
+// further down -- benchmark mode ignores --fft-size itself (it sweeps its
+// own fixed list of sizes across both CPU and GPU) and needs no real audio
+// capture or window, so the --fft-size power-of-two / GPU-size-cap checks
+// below are skipped in this mode too.
+var benchmarkFft = args.Contains("--benchmark-fft");
 
 int? gpuIndex = null;
 {
@@ -158,7 +208,7 @@ if (gpuIndex is { } gidx)
         Environment.SetEnvironmentVariable("__VK_LAYER_NV_optimus", "NVIDIA_only");
     }
 
-    Console.WriteLine($"[GlavaSharp] Requesting GPU index {gidx} (DRI_PRIME={gidx}" +
+    Log.Info($"Requesting GPU index {gidx} (DRI_PRIME={gidx}" +
                       (gidx > 0 ? ", NVIDIA prime-offload vars set" : "") + "). " +
                       "Check the 'GL: ... / <renderer>' line below to confirm which GPU actually got used. " +
                       "This also picks the GPU used by --fft-device gpu, since it shares the same GL context.");
@@ -169,12 +219,12 @@ if (args.Contains("--list-sinks") || args.Contains("--list-targets"))
     var targets = AudioTargetEnumerator.List();
     if (targets.Count == 0)
     {
-        Console.WriteLine("No PipeWire audio sinks/sources found. Is pipewire running?");
+        Log.Info("No PipeWire audio sinks/sources found. Is pipewire running?");
     }
     else
     {
-        Console.WriteLine("Available capture targets (use --sink <id>):");
-        foreach (var t in targets) Console.WriteLine("  " + t);
+        Log.Info("Available capture targets (use --sink <id>):");
+        foreach (var t in targets) Log.Info("  " + t);
     }
 
     return;
@@ -197,12 +247,12 @@ if (sinkArgIndex >= 0 && sinkArgIndex + 1 < args.Length)
                                  || t.Description.Equals(val, StringComparison.OrdinalIgnoreCase));
         if (match is null)
         {
-            Console.Error.WriteLine($"No sink/source matching \"{val}\". Run --list-sinks to see options.");
+            Log.Error($"No sink/source matching \"{val}\". Run --list-sinks to see options.");
             return;
         }
 
         targetId = match.Id;
-        Console.WriteLine($"[GlavaSharp] Resolved \"{val}\" -> node id {targetId}");
+        Log.Info($"Resolved \"{val}\" -> node id {targetId}");
     }
 }
 
@@ -210,7 +260,7 @@ var shaderRootDir = GetArgValue(args, "--shaders")
                     ?? Path.Combine(AppContext.BaseDirectory, "shaders", "glava");
 if (!Directory.Exists(shaderRootDir))
 {
-    Console.Error.WriteLine(
+    Log.Error(
         $"Shader directory not found: {shaderRootDir}\n" +
         "Pass --shaders <path-to-glava-shaders-dir> (the one containing rc.glsl and bars/).");
     return;
@@ -241,7 +291,7 @@ if (desktopGeomArg is not null)
         || !int.TryParse(parts[2], out var gw) || !int.TryParse(parts[3], out var gh)
         || gw <= 0 || gh <= 0)
     {
-        Console.Error.WriteLine(
+        Log.Error(
             $"--desktop-geometry must be \"X,Y,W,H\" with positive W/H, got \"{desktopGeomArg}\".");
         return;
     }
@@ -255,13 +305,13 @@ if (desktopMonitorArg is not null)
 {
     if (desktopGeomArg is not null)
     {
-        Console.Error.WriteLine("--desktop-monitor and --desktop-geometry are mutually exclusive -- pick one.");
+        Log.Error("--desktop-monitor and --desktop-geometry are mutually exclusive -- pick one.");
         return;
     }
 
     if (!int.TryParse(desktopMonitorArg, out var monIdx) || monIdx < 0)
     {
-        Console.Error.WriteLine($"--desktop-monitor must be a non-negative index, got \"{desktopMonitorArg}\".");
+        Log.Error($"--desktop-monitor must be a non-negative index, got \"{desktopMonitorArg}\".");
         return;
     }
 
@@ -269,9 +319,9 @@ if (desktopMonitorArg is not null)
 }
 
 var fftSize = GetArgIntValue(args, "--fft-size") ?? NextPowerOfTwo(rc.BufSize);
-if ((fftSize & (fftSize - 1)) != 0)
+if (!benchmarkFft && (fftSize & (fftSize - 1)) != 0)
 {
-    Console.Error.WriteLine($"--fft-size must be a power of two, got {fftSize}.");
+    Log.Error($"--fft-size must be a power of two, got {fftSize}.");
     return;
 }
 
@@ -286,13 +336,13 @@ switch (fftDeviceArg.Trim().ToLowerInvariant())
         fftDevice = FftDevice.Gpu;
         break;
     default:
-        Console.Error.WriteLine($"--fft-device must be \"cpu\" or \"gpu\", got \"{fftDeviceArg}\".");
+        Log.Error($"--fft-device must be \"cpu\" or \"gpu\", got \"{fftDeviceArg}\".");
         return;
 }
 
-if (fftDevice == FftDevice.Gpu && fftSize > 2048)
+if (!benchmarkFft && fftDevice == FftDevice.Gpu && fftSize > 2048)
 {
-    Console.Error.WriteLine(
+    Log.Error(
         $"--fft-device gpu requires --fft-size <= 2048 (single-workgroup limit), got {fftSize}.");
     return;
 }
@@ -322,7 +372,7 @@ switch (freqScaleArg.Trim().ToLowerInvariant())
         freqScale = FrequencyScale.Erb;
         break;
     default:
-        Console.Error.WriteLine(
+        Log.Error(
             $"--freq-scale must be \"linear\", \"log2\", \"mel\", \"bark\", or \"erb\", got \"{freqScaleArg}\".");
         return;
 }
@@ -337,19 +387,26 @@ var fftSettings = new FftSettings
     Scale = freqScale,
     Device = fftDevice
 };
-Console.WriteLine($"[GlavaSharp] FFT: device={fftDevice.ToString().ToLowerInvariant()}, " +
+
+if (benchmarkFft)
+{
+    RunFftBenchmark(fftSettings);
+    return;
+}
+
+Log.Info($"FFT: device={fftDevice.ToString().ToLowerInvariant()}, " +
                   $"size={fftSize} (bins={fftSize / 2}), " +
                   $"attack={fftAttack}, decay={fftDecay}, gain={fftGain}, sampleRate={sampleRate}, " +
                   $"freq-scale={freqScale.ToString().ToLowerInvariant()}");
 
 using var audio = new PipeWireAudioSource(sampleRate, targetId: targetId);
 audio.Start();
-Console.WriteLine(targetId < 0
-    ? "[GlavaSharp] Capturing default sink's monitor (\"what you hear\")."
-    : $"[GlavaSharp] Capturing PipeWire node id {targetId}.");
+Log.Info(targetId < 0
+    ? "Capturing default sink's monitor (\"what you hear\")."
+    : $"Capturing PipeWire node id {targetId}.");
 
 if (desktopMode)
-    Console.WriteLine("[GlavaSharp] Desktop mode requested (X11 only): forcing --platform x11.");
+    Log.Info("Desktop mode requested (X11 only): forcing --platform x11.");
 
 var options = new WindowOptions
 {
@@ -365,7 +422,7 @@ var options = new WindowOptions
     // no such requirement, so let it run on GLava's original 3.3 floor --
     // useful on older/lighter-weight GL implementations.
     GLMajor = fftDevice == FftDevice.Gpu ? 4 : 3,
-    GLMinor = fftDevice == FftDevice.Gpu ? 3 : 3,
+    GLMinor = 3,
     DesktopMode = desktopMode,
     DesktopX = desktopX,
     DesktopY = desktopY,
@@ -394,6 +451,148 @@ static float? GetArgFloatValue(string[] args, string flag)
 {
     var v = GetArgValue(args, flag);
     return v is not null && float.TryParse(v, out var parsed) ? parsed : null;
+}
+
+// --benchmark-fft: times IFft.Process() (CpuFft or GpuFft, per
+// --fft-device) across a representative spread of window sizes, no window/
+// visualization -- reports ms/call, calls/sec, and a checksum of the
+// returned spectrum straight to the console. The checksum isn't for
+// anything at runtime, it's so two separate runs (e.g. CpuFft with the
+// AVX2+FMA path active vs disabled via DOTNET_EnableAVX2=0, or CPU vs GPU)
+// can be diffed to confirm the code paths actually agree, not just that
+// one of them is faster. Fixed RNG seed and Scale=Linear (skips
+// FrequencyBucketing entirely) so runs are directly comparable and only
+// the FFT backend's own math differs between them.
+//
+// GPU needs a real GL context (compute shaders don't exist without one),
+// but not a visible one -- WindowHintBool.Visible false gets a normal GLFW
+// window/context pair that just never gets shown or rendered to, which is
+// all IFft.Process() ever touches on the GPU path anyway (upload -> dispatch
+// -> readback, no framebuffer involved).
+static unsafe void RunFftBenchmark(FftSettings baseSettings)
+{
+    int[] sizes = [1024, 2048, 4096, 8192];
+    const int warmupIters = 200; // also long enough for ApplyGravity's attack/decay state to converge on this constant input
+    const int timedIters = 2000;
+    var rng = new Random(12345);
+    var device = baseSettings.Device;
+
+    Window* hiddenWindow = null;
+    var maxWorkGroupInvocations = int.MaxValue;
+
+    if (device == FftDevice.Gpu)
+    {
+        if (!GLFWBind.Init())
+        {
+            Log.Error("GLFW initialization failed -- can't create a GL context to benchmark the GPU FFT.");
+            return;
+        }
+
+        GLFWBind.WindowHint(WindowHintBool.Visible, false);
+        GLFWBind.WindowHint(WindowHintInt.ContextVersionMajor, 4);
+        GLFWBind.WindowHint(WindowHintInt.ContextVersionMinor, 3);
+        GLFWBind.WindowHint(WindowHintOpenGlProfile.OpenGlProfile, OpenGlProfile.Core);
+        GLFWBind.WindowHint(WindowHintBool.OpenGLForwardCompat, true);
+        hiddenWindow = GLFWBind.CreateWindow(1, 1, "GlavaSharp FFT benchmark (hidden)", null, null);
+        if (hiddenWindow == null)
+        {
+            Log.Error(
+                "GL context creation failed -- can't benchmark the GPU FFT (needs a GL 4.3 context with compute shaders).");
+            GLFWBind.Terminate();
+            return;
+        }
+
+        GLFWBind.MakeContextCurrent(hiddenWindow);
+        GL.LoadBindings(new GLFWBindingsContext());
+        Log.Info($"GL: {GL.GetString(StringName.Version)} / {GL.GetString(StringName.Renderer)}");
+
+        // GpuFft dispatches a single workgroup of N/2 invocations -- sizes
+        // whose N/2 exceeds what this GPU actually allows get skipped below
+        // rather than attempted, since a compute shader that violates this
+        // limit is exactly the class of misconfiguration that's hung
+        // glCompileShader/glLinkProgram with no error on some driver paths
+        // (see the GpuFft bring-up notes in TECHNICAL.md) rather than
+        // failing cleanly.
+        maxWorkGroupInvocations = GL.GetInteger(GetPName.MaxComputeWorkGroupInvocations);
+        Log.Debug($"GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS = {maxWorkGroupInvocations}");
+    }
+
+    try
+    {
+        Log.Info($"FFT benchmark ({device}): warmup={warmupIters}, timed={timedIters} iterations/size");
+        Log.Info($"{"size",-6} {"ms/call",-9} {"calls/sec",-10} checksum");
+
+        foreach (var size in sizes)
+        {
+            if (device == FftDevice.Gpu && size / 2 > maxWorkGroupInvocations)
+            {
+                Log.Info(
+                    $"{size,-6} skipped (needs {size / 2} compute invocations, this GPU allows {maxWorkGroupInvocations})");
+                continue;
+            }
+
+            var settings = new FftSettings
+            {
+                Size = size,
+                Attack = baseSettings.Attack,
+                Decay = baseSettings.Decay,
+                Gain = baseSettings.Gain,
+                SampleRate = baseSettings.SampleRate,
+                Scale = FrequencyScale.Linear,
+                Device = device
+            };
+
+            IFft fft;
+            try
+            {
+                fft = device == FftDevice.Gpu ? new GpuFft(settings) : new CpuFft(settings);
+            }
+            catch (ArgumentException ex)
+            {
+                Log.Info($"{size,-6} skipped ({ex.Message})");
+                continue;
+            }
+
+            try
+            {
+                // Interleaved stereo, 2x the window length so Process()'s
+                // `take` (min(N, available)) is always the full N -- same
+                // shape a real ring buffer presents once it's past the
+                // initial fill.
+                var samples = new float[size * 2 * 2];
+                for (var i = 0; i < samples.Length; i++)
+                    samples[i] = MathF.Sin(i * 0.01f) * 0.3f + MathF.Sin(i * 0.037f) * 0.2f +
+                                 ((float)rng.NextDouble() - 0.5f) * 0.05f;
+
+                for (var i = 0; i < warmupIters; i++) fft.Process(samples);
+
+                var result = fft.Process(samples);
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                for (var i = 0; i < timedIters; i++) result = fft.Process(samples);
+                sw.Stop();
+
+                var msPerCall = sw.Elapsed.TotalMilliseconds / timedIters;
+                var callsPerSec = timedIters / sw.Elapsed.TotalSeconds;
+                var checksum = 0.0;
+                foreach (var v in result.left) checksum += v;
+                foreach (var v in result.right) checksum += v;
+
+                Log.Info($"{size,-6} {msPerCall,-9:F4} {callsPerSec,-10:F0} {checksum:F6}");
+            }
+            finally
+            {
+                fft.Dispose();
+            }
+        }
+    }
+    finally
+    {
+        if (hiddenWindow != null)
+        {
+            GLFWBind.DestroyWindow(hiddenWindow);
+            GLFWBind.Terminate();
+        }
+    }
 }
 
 static int NextPowerOfTwo(int n)

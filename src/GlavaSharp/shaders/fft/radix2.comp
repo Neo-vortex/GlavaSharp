@@ -1,0 +1,106 @@
+/* GlavaSharp-original GPU FFT kernel -- not part of GLava (which has no
+   GPU FFT at all; GlavaSharp's own CpuFft/GpuFft implement the FFT/window/
+   gravity pipeline natively instead of as GLava's own chained
+   `#request transform` shaders, see Shaders/CpuFft.cs's doc comment).
+
+   Iterative radix-2 Cooley-Tukey FFT, single compute workgroup
+   (local_size_x = N/2, everything in `shared` memory, no ping-ponging
+   buffers between dispatches) -- a bit-for-bit-equivalent GPU port of
+   CpuFft.Transform's scalar butterfly loop. Loaded and token-substituted
+   by Shaders/GpuFft.cs (see GpuFft.LoadKernelSource): __N__/__HALF__ below
+   get replaced with the actual FFT size/half-size before compilation,
+   since GLSL has no way to size a `shared` array or a workgroup from a
+   uniform -- both have to be compile-time constants.
+
+   This is the *only* GPU FFT kernel today, but it lives in its own file
+   (rather than back in GpuFft.cs as an embedded C# string) specifically so
+   a future alternative kernel -- a different radix, a multi-workgroup
+   Stockham autosort that isn't capped by GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS
+   the way this one is, etc. -- can sit alongside it as a sibling file
+   without touching this one. There's no kernel-selection mechanism in
+   GpuFft.cs yet (it always loads this file) -- that's follow-up work for
+   whenever a second kernel actually exists, not speculative plumbing
+   added ahead of it. */
+
+#version 430
+layout(local_size_x = __HALF__) in;
+
+// Windowed, bit-reversed time-domain samples, precomputed on the CPU (same
+// _hann/_bitRev tables as CpuFft) so the shader only has to do the
+// butterfly stages, not windowing or bit-reversal.
+layout(std430, binding = 0) buffer InL { float inL[]; };
+layout(std430, binding = 1) buffer InR { float inR[]; };
+layout(std430, binding = 2) buffer OutL { float outL[]; };
+layout(std430, binding = 3) buffer OutR { float outR[]; };
+
+shared vec2 shL[__N__];
+shared vec2 shR[__N__];
+
+const float PI = 3.14159265359;
+const uint N = __N__u;
+const uint HALF = __HALF__u;
+
+// Deliberately uniforms, not compile-time consts: with LOGN baked in as a
+// literal, Mesa's compute-shader compiler (iris/NIR on Intel) tries to
+// fully unroll the stage loop and do scalar replacement on the two
+// __N__-element `shared` arrays above, since every index into them is a
+// per-invocation runtime value rather than a constant. That combination
+// can make glCompileShader/glLinkProgram hang or take minutes on real
+// hardware with no error reported. Keeping LOGN (and the tunables below)
+// as uniforms forces the driver to keep this as a real loop instead.
+uniform uint u_logN;
+uniform float u_normFactor; // 2 / (N * hannWindowGain), matches CpuFft
+uniform float u_gain;       // FftSettings.Gain (log-compression contrast)
+
+vec2 cmul(vec2 a, vec2 b) { return vec2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x); }
+
+void main() {
+    uint tid = gl_LocalInvocationID.x; // 0 .. HALF-1
+
+    // inL/inR already windowed + bit-reversed on the CPU; imaginary part
+    // starts at zero, same as CpuFft's _imL/_imR.
+    shL[tid] = vec2(inL[tid], 0.0);
+    shL[tid + HALF] = vec2(inL[tid + HALF], 0.0);
+    shR[tid] = vec2(inR[tid], 0.0);
+    shR[tid + HALF] = vec2(inR[tid + HALF], 0.0);
+    barrier();
+
+    // In-place iterative DIT FFT, identical stage structure to
+    // CpuFft.Transform: for each of log2(N) stages, pair up elements
+    // `half` apart within blocks of `size`, apply the twiddle factor for
+    // this stage/position, and butterfly. Both channels share the same
+    // j/twiddle math, so they're done together in one loop -- shL/shR are
+    // referenced directly (not passed through a function call) since
+    // `shared` arrays can't safely cross a GLSL function boundary by
+    // value/inout.
+    for (uint stage = 0u; stage < u_logN; stage++) {
+        uint m = 1u << (stage + 1u);
+        uint half_ = m >> 1;
+        uint k = tid % half_;
+        uint j = (tid / half_) * m + k;
+        float angle = -2.0 * PI * float(k) / float(m);
+        vec2 w = vec2(cos(angle), sin(angle));
+
+        vec2 aL = shL[j];
+        vec2 bL = cmul(w, shL[j + half_]);
+        vec2 aR = shR[j];
+        vec2 bR = cmul(w, shR[j + half_]);
+        barrier();
+        shL[j] = aL + bL;
+        shL[j + half_] = aL - bL;
+        shR[j] = aR + bR;
+        shR[j + half_] = aR - bR;
+        barrier();
+    }
+
+    // Only the first N/2 bins (single-sided spectrum) are meaningful; this
+    // workgroup has exactly HALF=N/2 invocations, so every invocation
+    // writes exactly one output bin -- same magnitude/log-compression
+    // formula as CpuFft.Process:
+    //   norm = 2 / (N * windowGain)
+    //   out  = clamp(log(1 + mag*gain) / log(1 + gain), 0, 1)
+    float magL = length(shL[tid]) * u_normFactor;
+    float magR = length(shR[tid]) * u_normFactor;
+    outL[tid] = clamp(log(1.0 + magL * u_gain) / log(1.0 + u_gain), 0.0, 1.0);
+    outR[tid] = clamp(log(1.0 + magR * u_gain) / log(1.0 + u_gain), 0.0, 1.0);
+}

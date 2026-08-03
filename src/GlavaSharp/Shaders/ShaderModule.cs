@@ -97,10 +97,10 @@ public sealed class ShaderModule : IDisposable
 
             var (src, uniformBindings) = GlavaPreprocessor.Process(fragPath, ModuleDir, RootDir);
             var pass = new Pass { SourcePath = fragPath };
-            Console.WriteLine($"[GlavaSharp] compiling pass {fragPath} ...");
+            Log.Debug($"compiling pass {fragPath} ...");
             if (TryCompilePass(src, fragPath, useAlpha, freqPrebucketed, out var program, out var disabledStage))
             {
-                Console.WriteLine($"[GlavaSharp] pass {fragPath} compiled+linked OK");
+                Log.Debug($"pass {fragPath} compiled+linked OK");
                 pass.Enabled = true;
                 pass.Program = program;
                 // GLava lets a pass name its previous-pass sampler2D anything
@@ -349,12 +349,12 @@ public sealed class ShaderModule : IDisposable
         program = 0;
         disabledStage = false;
 
-        Console.WriteLine("[GlavaSharp]   compiling vertex shader ...");
+        Log.Debug("  compiling vertex shader ...");
         var vs = GL.CreateShader(ShaderType.VertexShader);
         GL.ShaderSource(vs, VertexSource);
         GL.CompileShader(vs);
         CheckShader(vs, "vertex (fullscreen triangle)"); // this one's ours; a failure here is always a real bug
-        Console.WriteLine("[GlavaSharp]   vertex shader compiled OK");
+        Log.Debug("  vertex shader compiled OK");
 
         // _USE_ALPHA is GLava's host-computed macro (like _SMOOTH_FACTOR),
         // not something modules define themselves -- gates the alpha-blend
@@ -372,7 +372,7 @@ public sealed class ShaderModule : IDisposable
         var fs = GL.CreateShader(ShaderType.FragmentShader);
         GL.ShaderSource(fs, fullFrag);
         GL.CompileShader(fs);
-        Console.WriteLine("[GlavaSharp]   fragment shader glCompileShader() returned");
+        Log.Debug("  fragment shader glCompileShader() returned");
         GL.GetShader(fs, ShaderParameter.CompileStatus, out var fsOk);
         if (fsOk == 0)
         {
@@ -385,16 +385,16 @@ public sealed class ShaderModule : IDisposable
                 return false;
             }
 
-            Console.Error.WriteLine($"Shader compile failed [{path}]:\n{log}");
+            Log.Error($"Shader compile failed [{path}]:\n{log}");
             return false;
         }
 
         program = GL.CreateProgram();
         GL.AttachShader(program, vs);
         GL.AttachShader(program, fs);
-        Console.WriteLine("[GlavaSharp]   linking program ...");
+        Log.Debug("  linking program ...");
         GL.LinkProgram(program);
-        Console.WriteLine("[GlavaSharp]   glLinkProgram() returned");
+        Log.Debug("  glLinkProgram() returned");
         GL.GetProgram(program, GetProgramParameterName.LinkStatus, out var linked);
         GL.DetachShader(program, vs);
         GL.DetachShader(program, fs);
@@ -403,7 +403,7 @@ public sealed class ShaderModule : IDisposable
         if (linked != 0) return true;
         {
             GL.GetProgramInfoLog(program, out var log);
-            Console.Error.WriteLine($"Link failed for {path}:\n{log}");
+            Log.Error($"Link failed for {path}:\n{log}");
             GL.DeleteProgram(program);
             program = 0;
             return false;

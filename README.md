@@ -131,6 +131,19 @@ cmake --build build --target appimage
 # -> build/GlavaSharp-x86_64.AppImage
 ```
 
+For a faster CPU FFT on machines you know have AVX2+FMA (most x86_64 CPUs
+since ~2013), reconfigure with `-DGLAVASHARP_AVX2_CPU_FFT=ON` before
+building — 1.2x-1.6x faster (see
+[TECHNICAL.md's Benchmarks](TECHNICAL.md#benchmarks)), at the cost of the
+resulting binary refusing to run at all on CPUs without AVX2+FMA. The
+`appimage` target names its output `GlavaSharp-x86_64-avx2.AppImage`
+instead of the plain name when this is on, so the two can't be mixed up:
+
+```bash
+cmake -S . -B build -DGLAVASHARP_AVX2_CPU_FFT=ON
+cmake --build build && cmake --build build --target appimage
+```
+
 See [TECHNICAL.md](TECHNICAL.md#building-detailed) for building each
 piece independently, cleaning, and why a plain `dotnet build` alone can't
 run the app end-to-end.

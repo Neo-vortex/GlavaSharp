@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using GlavaSharp.Audio;
 using GlavaSharp.Shaders;
 using OpenTK.Graphics.OpenGL;
@@ -72,20 +73,20 @@ public sealed unsafe class AppWindow : IDisposable
         GLFWBind.SwapInterval(1); // vsync; revisit once we care about latency vs. audio sync
 
         GL.LoadBindings(new GLFWBindingsContext());
-        Console.WriteLine($"[GlavaSharp] GL: {GL.GetString(StringName.Version)} / {GL.GetString(StringName.Renderer)}");
+        Log.Info($"GL: {GL.GetString(StringName.Version)} / {GL.GetString(StringName.Renderer)}");
 
         if (options.DesktopMode) SetUpDesktopMode(options);
 
         // Audio pipeline: ring buffer -> tail window -> FFT (CPU or GPU,
         // per FftSettings.Device) -> two 1D spectrum textures.
         var device = fftSettings?.Device ?? FftDevice.Cpu;
-        Console.WriteLine($"[GlavaSharp] before fft (device={device})");
+        Log.Debug($"before fft (device={device})");
         _fft = device switch
         {
             FftDevice.Gpu => new GpuFft(fftSettings),
             _ => new CpuFft(fftSettings)
         };
-        Console.WriteLine($"[GlavaSharp] after fft");
+        Log.Debug("after fft");
         _texL = new AudioSpectrumTexture(_fft.Bins);
         _texR = new AudioSpectrumTexture(_fft.Bins);
         _audioWindow = new AudioWindow(_fft.N, Math.Max(_audio.Channels, 2));
@@ -100,7 +101,7 @@ public sealed unsafe class AppWindow : IDisposable
         // exactly when CpuFft/GpuFft are actually bucketing upstream.
         var freqPrebucketed = (fftSettings?.Scale ?? FrequencyScale.Log2) != FrequencyScale.Linear;
         _module = new ShaderModule(shaderRootDir, moduleName, options.DesktopMode, freqPrebucketed);
-        Console.WriteLine($"[GlavaSharp] Loaded module '{moduleName}' from {_module.ModuleDir}");
+        Log.Info($"Loaded module '{moduleName}' from {_module.ModuleDir}");
     }
 
     public void Dispose()
@@ -164,16 +165,15 @@ public sealed unsafe class AppWindow : IDisposable
             (geomX, geomY, geomW, geomH) = ResolveMonitorRect(monitorIndex);
         _desktopModeHandle = X11Native.x11shim_desktop_mode_start(xid, geomX, geomY, geomW, geomH);
         if (_desktopModeHandle == IntPtr.Zero)
-            Console.Error.WriteLine(
-                "[GlavaSharp] Warning: --desktop setup failed (see x11shim error above); " +
-                "continuing as a normal window.");
+            Log.Warn(
+                "--desktop setup failed (see x11shim error above); continuing as a normal window.");
         else if (geomW > 0 && geomH > 0)
-            Console.WriteLine(
-                "[GlavaSharp] Desktop mode enabled (X11 EWMH: NORMAL+below+sticky+skip_taskbar/pager, " +
+            Log.Info(
+                "Desktop mode enabled (X11 EWMH: NORMAL+below+sticky+skip_taskbar/pager, " +
                 $"auto-restacked above xfdesktop as a fallback, click-through), geometry {geomW}x{geomH}+{geomX}+{geomY}.");
         else
-            Console.WriteLine(
-                "[GlavaSharp] Desktop mode enabled (X11 EWMH: NORMAL+below+sticky+skip_taskbar/pager, " +
+            Log.Info(
+                "Desktop mode enabled (X11 EWMH: NORMAL+below+sticky+skip_taskbar/pager, " +
                 "auto-restacked above xfdesktop as a fallback, click-through), covering the whole screen.");
     }
 
@@ -208,16 +208,23 @@ public sealed unsafe class AppWindow : IDisposable
         try
         {
             var platform = GLFWBind.GetPlatform();
-            Console.WriteLine($"[GlavaSharp] GLFW selected platform: {platform}");
+            Log.Info($"GLFW selected platform: {platform}");
         }
         catch (EntryPointNotFoundException)
         {
-            Console.WriteLine("[GlavaSharp] GLFW build predates GetPlatform(); platform unknown at this log point.");
+            Log.Debug("GLFW build predates GetPlatform(); platform unknown at this log point.");
         }
     }
 
     public void Run()
     {
+        // Debug-only: how many frames actually got rendered since the last
+        // report, and a wall-clock stopwatch for "has a second gone by" --
+        // both reset every report rather than free-running, so this is a
+        // plain instantaneous-fps counter, not a smoothed/rolling average.
+        var frameCount = 0;
+        var fpsTimer = Stopwatch.StartNew();
+
         while (!GLFWBind.WindowShouldClose(_handle))
         {
             GLFWBind.PollEvents();
@@ -233,6 +240,15 @@ public sealed unsafe class AppWindow : IDisposable
             if (fbWidth > 0 && fbHeight > 0) _module.Render(fbWidth, fbHeight, _texL.Handle, _texR.Handle, _fft.Bins);
 
             GLFWBind.SwapBuffers(_handle);
+
+            frameCount++;
+            var elapsed = fpsTimer.Elapsed.TotalSeconds;
+            if (elapsed >= 1.0)
+            {
+                Log.Debug($"{frameCount / elapsed:F1} fps");
+                frameCount = 0;
+                fpsTimer.Restart();
+            }
         }
     }
 }
