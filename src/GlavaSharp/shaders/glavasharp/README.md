@@ -25,3 +25,13 @@ directory when a module isn't found under the primary `--shaders` root.
   texture pair that isn't cleared every frame like the normal one is —
   see the class doc comment on `Shaders/ShaderModule.cs` and
   `waterfall/1.frag`'s comments for the details.
+- **`aurora/`** — a calming, ambient desktop visualizer: soft curtains of
+  color drift upward and sway gently like the northern lights, driven by
+  the audio spectrum, fading into a fully transparent background so it
+  reads well as a desktop backdrop (`--desktop`) rather than a foreground
+  visualizer. Also uses the persistent "history" buffer, but as a
+  decay+drift feedback loop instead of waterfall's hard scroll — no clock
+  or time uniform involved, the motion comes entirely from re-sampling the
+  buffer's own previous frame through a fixed sideways sway each frame; see
+  `aurora/1.frag`'s comments for how that produces organic-looking drift
+  from pure feedback.
