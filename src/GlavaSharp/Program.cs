@@ -1,6 +1,3 @@
-using System;
-using System.IO;
-using System.Linq;
 using GlavaSharp;
 using GlavaSharp.Audio;
 using GlavaSharp.Shaders;
@@ -43,6 +40,20 @@ using GlavaSharp.Windowing;
 //                           --fft-size at 2048 -- single workgroup).
 //                           The GPU FFT runs on whichever GPU got
 //                           selected via --gpu below.
+// --desktop                  GLava's `-d` / `setxwintype "desktop"`: render
+//                           pinned behind desktop icons via X11 EWMH hints
+//                           instead of a normal top-level window. X11 only
+//                           (forces --platform x11); also honored via
+//                           rc.glsl's `#request setxwintype "desktop"` (e.g.
+//                           shaders/glava/env_Xfwm4.glsl already requests
+//                           it) when this flag isn't passed.
+// --desktop-geometry X,Y,W,H  GLava's `setgeometry` equivalent for desktop
+//                           mode: place/size the desktop-mode window at
+//                           that exact rect instead of covering the whole
+//                           screen. Falls back to rc.glsl's own
+//                           `setgeometry` (if present) when --desktop is
+//                           set and this flag isn't; only applies with
+//                           --desktop / setxwintype "desktop".
 if (args.Contains("--list-gpus"))
 {
     var gpus = GpuEnumerator.List();
@@ -74,15 +85,11 @@ if (gpuIndex is { } gidx)
     // Mesa multi-GPU (e.g. Intel iGPU + AMD/Intel dGPU): DRI_PRIME picks
     // the render node by index.
     if (gidx == 0)
-    {
         // Default GPU (Intel)
         Environment.SetEnvironmentVariable("DRI_PRIME", null);
-    }
     else
-    {
         // First offload GPU
         Environment.SetEnvironmentVariable("DRI_PRIME", gidx.ToString());
-    }
     // NVIDIA PRIME render offload (proprietary driver, hybrid laptops):
     // harmless no-op if you don't have an NVIDIA GPU at all.
     if (gidx > 0)
@@ -153,6 +160,34 @@ if (!Directory.Exists(shaderRootDir))
 var rcPath = Path.Combine(shaderRootDir, "rc.glsl");
 var rc = File.Exists(rcPath) ? RcConfig.Load(rcPath) : new RcConfig();
 var moduleName = GetArgValue(args, "--module") ?? rc.Module;
+var desktopMode = args.Contains("--desktop") || rc.Desktop;
+
+// --desktop-geometry wins if passed; otherwise rc.glsl's own setgeometry
+// (already parsed into rc.GeomX/Y/Width/Height) applies when desktop mode
+// is active, since GLava lets setgeometry position desktop-embedded
+// windows too, not just normal ones. Null all around means "cover the
+// whole screen" -- x11shim's own default.
+int? desktopX = null, desktopY = null, desktopWidth = null, desktopHeight = null;
+var desktopGeomArg = GetArgValue(args, "--desktop-geometry");
+if (desktopGeomArg is not null)
+{
+    var parts = desktopGeomArg.Split(',');
+    if (parts.Length != 4
+        || !int.TryParse(parts[0], out var gx) || !int.TryParse(parts[1], out var gy)
+        || !int.TryParse(parts[2], out var gw) || !int.TryParse(parts[3], out var gh)
+        || gw <= 0 || gh <= 0)
+    {
+        Console.Error.WriteLine(
+            $"--desktop-geometry must be \"X,Y,W,H\" with positive W/H, got \"{desktopGeomArg}\".");
+        return;
+    }
+
+    (desktopX, desktopY, desktopWidth, desktopHeight) = (gx, gy, gw, gh);
+}
+else if (desktopMode && rc.HasGeometry)
+{
+    (desktopX, desktopY, desktopWidth, desktopHeight) = (rc.GeomX, rc.GeomY, rc.Width, rc.Height);
+}
 
 var fftSize = GetArgIntValue(args, "--fft-size") ?? NextPowerOfTwo(rc.BufSize);
 if ((fftSize & (fftSize - 1)) != 0)
@@ -205,19 +240,29 @@ Console.WriteLine(targetId < 0
     ? "[GlavaSharp] Capturing default sink's monitor (\"what you hear\")."
     : $"[GlavaSharp] Capturing PipeWire node id {targetId}.");
 
+if (desktopMode)
+    Console.WriteLine("[GlavaSharp] Desktop mode requested (X11 only): forcing --platform x11.");
+
 var options = new WindowOptions
 {
     Title = rc.Title,
     Width = rc.Width,
     Height = rc.Height,
     // GLFW_PLATFORM_ANY lets GLFW auto-select Wayland when running inside a
-    // Wayland session and fall back to X11 otherwise.
-    Platform = PlatformPreference.Any,
+    // Wayland session and fall back to X11 otherwise -- except under
+    // --desktop, which has no Wayland implementation yet and needs X11
+    // forced so AppWindow doesn't silently end up on Wayland and no-op.
+    Platform = desktopMode ? PlatformPreference.X11 : PlatformPreference.Any,
     // GpuFft needs GL_ARB_compute_shader + SSBOs (core in 4.3). CpuFft has
     // no such requirement, so let it run on GLava's original 3.3 floor --
     // useful on older/lighter-weight GL implementations.
     GLMajor = fftDevice == FftDevice.Gpu ? 4 : 3,
-    GLMinor = fftDevice == FftDevice.Gpu ? 3 : 3
+    GLMinor = fftDevice == FftDevice.Gpu ? 3 : 3,
+    DesktopMode = desktopMode,
+    DesktopX = desktopX,
+    DesktopY = desktopY,
+    DesktopWidth = desktopWidth,
+    DesktopHeight = desktopHeight
 };
 
 using var window = new AppWindow(options, audio, shaderRootDir, moduleName, fftSettings);

@@ -22,6 +22,7 @@ public sealed unsafe class AppWindow : IDisposable
     private readonly AudioSpectrumTexture _texL;
     private readonly AudioSpectrumTexture _texR;
     private Window* _handle;
+    private IntPtr _desktopModeHandle;
 
     public AppWindow(WindowOptions options, IAudioSource audio, string shaderRootDir, string moduleName,
         FftSettings? fftSettings = null)
@@ -49,6 +50,14 @@ public sealed unsafe class AppWindow : IDisposable
         GLFWBind.WindowHint(WindowHintOpenGlProfile.OpenGlProfile, OpenGlProfile.Core);
         GLFWBind.WindowHint(WindowHintBool.OpenGLForwardCompat, true);
         GLFWBind.WindowHint(WindowHintBool.Resizable, true);
+        // Without this, the window's alpha channel exists (GLFW defaults to
+        // 8 alpha bits) but the X server composites the window as opaque
+        // regardless of what the shaders write into it -- GLava's own bars
+        // shader already writes alpha=0 for "no bar here" pixels (see
+        // shaders/glava/bars/1.frag's default `fragment = vec4(0,0,0,0)`),
+        // it just needs a compositor-visible alpha channel to show through.
+        // Requires a running compositing manager (xfwm4 has one built in).
+        if (options.DesktopMode) GLFWBind.WindowHint(WindowHintBool.TransparentFramebuffer, true);
 
         _handle = GLFWBind.CreateWindow(options.Width, options.Height, options.Title, null, null);
         if (_handle == null)
@@ -64,6 +73,8 @@ public sealed unsafe class AppWindow : IDisposable
 
         GL.LoadBindings(new GLFWBindingsContext());
         Console.WriteLine($"[GlavaSharp] GL: {GL.GetString(StringName.Version)} / {GL.GetString(StringName.Renderer)}");
+
+        if (options.DesktopMode) SetUpDesktopMode(options);
 
         // Audio pipeline: ring buffer -> tail window -> FFT (CPU or GPU,
         // per FftSettings.Device) -> two 1D spectrum textures.
@@ -91,6 +102,12 @@ public sealed unsafe class AppWindow : IDisposable
         _texR.Dispose();
         _fft.Dispose();
 
+        if (_desktopModeHandle != IntPtr.Zero)
+        {
+            X11Native.x11shim_desktop_mode_stop(_desktopModeHandle);
+            _desktopModeHandle = IntPtr.Zero;
+        }
+
         if (_handle != null)
         {
             GLFWBind.DestroyWindow(_handle);
@@ -98,6 +115,55 @@ public sealed unsafe class AppWindow : IDisposable
         }
 
         GLFWBind.Terminate();
+    }
+
+    /// <summary>
+    ///     GLava's `-d` / `setxwintype "desktop"`. Hands the underlying X11
+    ///     window ID to native/x11shim (Rust), which does the actual EWMH
+    ///     work -- see Windowing/X11Native.cs and native/x11shim/src/lib.rs.
+    ///     Requires GLFW to have actually selected X11 (Program.cs forces
+    ///     <see cref="PlatformPreference.X11" /> when --desktop is set, so
+    ///     this should only trip if X11 itself isn't available at all).
+    /// </summary>
+    private void SetUpDesktopMode(WindowOptions options)
+    {
+        try
+        {
+            var platform = GLFWBind.GetPlatform();
+            if (platform != Platform.X11)
+                throw new InvalidOperationException(
+                    $"--desktop requires an X11 session, but GLFW selected platform '{platform}'. " +
+                    "Desktop-embedded mode isn't implemented for native Wayland yet -- under a Wayland " +
+                    "session this needs at least XWayland running.");
+        }
+        catch (EntryPointNotFoundException)
+        {
+            // GLFW build predates glfwGetPlatform() (same fallback as
+            // LogSelectedPlatform below) -- we already forced the X11 init
+            // hint before GLFW's Init() succeeded, so proceed on that basis.
+        }
+
+        var xid = (ulong)GLFWBind.GetX11Window(_handle);
+        // 0/0/0/0 tells x11shim "no override, cover the whole screen" -- its
+        // own default. DesktopWidth/Height <= 0 (unset) short-circuits to
+        // that regardless of what X/Y are, matching X11Native's contract.
+        var geomX = options.DesktopX ?? 0;
+        var geomY = options.DesktopY ?? 0;
+        var geomW = options.DesktopWidth ?? 0;
+        var geomH = options.DesktopHeight ?? 0;
+        _desktopModeHandle = X11Native.x11shim_desktop_mode_start(xid, geomX, geomY, geomW, geomH);
+        if (_desktopModeHandle == IntPtr.Zero)
+            Console.Error.WriteLine(
+                "[GlavaSharp] Warning: --desktop setup failed (see x11shim error above); " +
+                "continuing as a normal window.");
+        else if (geomW > 0 && geomH > 0)
+            Console.WriteLine(
+                "[GlavaSharp] Desktop mode enabled (X11 EWMH: _NET_WM_WINDOW_TYPE_DESKTOP, " +
+                $"below+sticky, auto-relower on stacking changes), geometry {geomW}x{geomH}+{geomX}+{geomY}.");
+        else
+            Console.WriteLine(
+                "[GlavaSharp] Desktop mode enabled (X11 EWMH: _NET_WM_WINDOW_TYPE_DESKTOP, " +
+                "below+sticky, auto-relower on stacking changes), covering the whole screen.");
     }
 
     private static void LogSelectedPlatform()

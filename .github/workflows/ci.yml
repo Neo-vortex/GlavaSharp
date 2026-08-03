@@ -65,6 +65,54 @@ jobs:
           path: native/pwshim/target/release/libpwshim.a
 
   # --------------------------------------------------------------------
+  # Rust: build + test the x11shim crate in isolation (native/x11shim/).
+  # Pure-Rust (x11rb speaks the X11 wire protocol directly), so unlike
+  # pwshim this needs no system dev headers or clang/bindgen.
+  # --------------------------------------------------------------------
+  x11shim:
+    name: Rust (x11shim)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: native/x11shim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry/target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/x11shim/target
+          key: cargo-x11shim-${{ runner.os }}-${{ hashFiles('native/x11shim/Cargo.lock') }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+        continue-on-error: true # style-only; don't fail the build over it yet
+
+      - name: cargo clippy
+        run: cargo clippy --release --all-targets -- -D warnings
+        continue-on-error: true # style-only; don't fail the build over it yet
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: cargo test
+        run: cargo test --release
+
+      - name: Upload libx11shim.a
+        uses: actions/upload-artifact@v4
+        with:
+          name: libx11shim-a
+          path: native/x11shim/target/release/libx11shim.a
+
+  # --------------------------------------------------------------------
   # .NET: build + test the GlavaSharp project on its own. Deliberately
   # plain `dotnet build` (PublishAot is NOT set here), so this job does
   # NOT need the Rust static lib -- <NativeLibrary>/<DirectPInvoke> in the
@@ -104,7 +152,7 @@ jobs:
   native-aot-integration:
     name: Native AOT integration build (CMake)
     runs-on: ubuntu-latest
-    needs: [ rust, dotnet ]
+    needs: [ rust, x11shim, dotnet ]
     steps:
       - uses: actions/checkout@v4
 
@@ -129,12 +177,13 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             native/pwshim/target
-          key: cargo-${{ runner.os }}-${{ hashFiles('native/pwshim/Cargo.lock') }}
+            native/x11shim/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/pwshim/Cargo.lock', 'native/x11shim/Cargo.lock') }}
 
       - name: Configure
         run: cmake -S . -B build
 
-      - name: Build (Rust shim -> Native AOT publish, statically linked)
+      - name: Build (Rust shims -> Native AOT publish, statically linked)
         run: cmake --build build
 
       - name: Verify the published binary exists and runs --list-gpus

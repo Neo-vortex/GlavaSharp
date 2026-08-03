@@ -145,7 +145,7 @@ public sealed class GpuFft : IFft
         // --- Same precomputation as CpuFft: Hann window (+ its mean, for
         // --- normalization), and the bit-reversal permutation table. No
         // --- twiddle table needed here -- the shader computes cos/sin
-        // --- per-invocation, same as the CPU version could but doesn't
+        // --- per-invocation, same as the CPU version 
         // --- (CPU precomputes for speed; on the GPU, HALF invocations run
         // --- the trig in parallel so it's cheap either way).
         _hann = new float[N];

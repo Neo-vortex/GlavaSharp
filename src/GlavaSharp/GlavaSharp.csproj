@@ -37,12 +37,13 @@
         <Content Include="shaders/**/*" CopyToOutputDirectory="PreserveNewest"/>
     </ItemGroup>
 
-    <!-- Statically link the Rust pwshim staticlib (../../native/pwshim/) into
-         the AOT executable, so the final output is a single file with no
-         sibling libpwshim.so. DirectPInvoke tells ILC to bind
-         pwshim_start/pwshim_stop at compile time instead of resolving them
-         via dlopen at runtime. Built by CMake before dotnet publish runs;
-         see native/pwshim/Cargo.toml. -->
+    <!-- Statically link the Rust native shims (../../native/*/) into the AOT
+         executable, so the final output is a single file with no sibling
+         .so's. DirectPInvoke tells ILC to bind their entry points
+         (pwshim_start/x11shim_desktop_mode_start/...) at compile time
+         instead of resolving them via dlopen at runtime. Built by CMake
+         before dotnet publish runs; see native/pwshim/Cargo.toml and
+         native/x11shim/Cargo.toml. -->
     <ItemGroup Condition="'$(PublishAot)' == 'true'">
         <DirectPInvoke Include="pwshim"/>
         <NativeLibrary Include="$(MSBuildThisFileDirectory)../../native/pwshim/target/release/libpwshim.a"/>
@@ -50,5 +51,10 @@
              it (it's a shared system library, same as libc) — ILC's generated
              link command needs telling explicitly to link against it. -->
         <LinkerArg Include="-lpipewire-0.3"/>
+        <!-- x11shim (Windowing/X11Native.cs, desktop mode) speaks the X11
+             wire protocol directly (x11rb) rather than linking libX11, so it
+             needs no extra native library reference here beyond itself. -->
+        <DirectPInvoke Include="x11shim"/>
+        <NativeLibrary Include="$(MSBuildThisFileDirectory)../../native/x11shim/target/release/libx11shim.a"/>
     </ItemGroup>
 </Project>

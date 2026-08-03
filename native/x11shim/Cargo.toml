@@ -1,0 +1,26 @@
+[package]
+name = "x11shim"
+version = "0.1.0"
+edition = "2021"
+
+# staticlib (not cdylib): same reasoning as native/pwshim -- Native AOT
+# statically links this .a directly into the final executable via
+# <NativeLibrary> in the csproj, so there's no separate libx11shim.so to
+# ship alongside the exe.
+[lib]
+name = "x11shim"
+crate-type = ["staticlib"]
+
+[dependencies]
+# Pure-Rust X11 protocol implementation (talks the wire protocol directly
+# over a Unix socket) -- unlike pwshim's `pipewire` crate, this needs no
+# bindgen/clang and no system X11 dev headers at build time, only a running
+# X server at runtime.
+# "shape": the SHAPE extension, used to make the window fully click-through
+# (see src/lib.rs) so it doesn't intercept clicks meant for desktop icons,
+# independent of window-stacking order.
+x11rb = { version = "0.14", features = ["shape"] }
+
+[profile.release]
+opt-level = 2
+panic = "abort"

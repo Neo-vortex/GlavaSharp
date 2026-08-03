@@ -24,4 +24,32 @@ public sealed class WindowOptions
     public int GLMajor { get; init; } = 4;
 
     public int GLMinor { get; init; } = 3;
+
+    /// <summary>
+    ///     GLava's `-d` / `setxwintype "desktop"`: render pinned behind
+    ///     desktop icons via X11 EWMH hints (see Windowing/X11Native.cs +
+    ///     native/x11shim/) instead of as a normal top-level window. X11
+    ///     only -- <see cref="AppWindow" /> forces <see cref="Platform" />
+    ///     to <see cref="PlatformPreference.X11" /> when this is set, and
+    ///     fails loudly if GLFW doesn't actually select X11.
+    /// </summary>
+    public bool DesktopMode { get; init; }
+
+    /// <summary>
+    ///     Desktop-mode placement/size, GLava's `setgeometry` equivalent for
+    ///     `-d` (see `--desktop-geometry` in Program.cs). All four null (the
+    ///     default) means "cover the whole screen", matching GlavaSharp's
+    ///     original --desktop behavior. Ignored when <see cref="DesktopMode" />
+    ///     is false.
+    /// </summary>
+    public int? DesktopX { get; init; }
+
+    /// <summary>See <see cref="DesktopX" />.</summary>
+    public int? DesktopY { get; init; }
+
+    /// <summary>See <see cref="DesktopX" />.</summary>
+    public int? DesktopWidth { get; init; }
+
+    /// <summary>See <see cref="DesktopX" />.</summary>
+    public int? DesktopHeight { get; init; }
 }

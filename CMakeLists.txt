@@ -100,22 +100,27 @@ endif ()
 #   native/pwshim/      the Rust PipeWire capture shim (separate, not nested
 #                        inside the C# project — it's a standalone crate the
 #                        .csproj statically links against, not C# code)
+#   native/x11shim/     the Rust X11 EWMH desktop-mode shim (--desktop),
+#                        same reasoning as pwshim -- a standalone crate, not
+#                        C# code, statically linked via the .csproj
 set(DOTNET_PROJECT_DIR ${CMAKE_SOURCE_DIR}/src/GlavaSharp)
 set(DOTNET_PROJECT ${DOTNET_PROJECT_DIR}/GlavaSharp.csproj)
 set(RUST_SHIM_DIR ${CMAKE_SOURCE_DIR}/native/pwshim)
 set(RUST_SHIM_LIB ${RUST_SHIM_DIR}/target/release/libpwshim.a)
+set(X11_SHIM_DIR ${CMAKE_SOURCE_DIR}/native/x11shim)
+set(X11_SHIM_LIB ${X11_SHIM_DIR}/target/release/libx11shim.a)
 set(PUBLISH_DIR ${CMAKE_BINARY_DIR}/dist)
 set(FINAL_EXECUTABLE ${PUBLISH_DIR}/GlavaSharp)
 
 # ------------------------------------------------------------------------
-# Step 1: build the Rust PipeWire shim as a static library.
+# Step 1: build the Rust native shims as static libraries.
 #
 # NOTE: this always invokes `cargo build`, rather than only running when
-# libpwshim.a is missing. cargo's own incremental cache keeps a no-op
-# rebuild fast, and the alternative (an OUTPUT-based custom_command with
-# no DEPENDS on the actual .rs/Cargo.toml sources) silently goes stale —
-# CMake/Make sees the .a already exists and never re-invokes cargo again,
-# even after you edit lib.rs. That bit us once already; don't repeat it.
+# the .a is missing. cargo's own incremental cache keeps a no-op rebuild
+# fast, and the alternative (an OUTPUT-based custom_command with no DEPENDS
+# on the actual .rs/Cargo.toml sources) silently goes stale — CMake/Make
+# sees the .a already exists and never re-invokes cargo again, even after
+# you edit lib.rs. That bit us once already; don't repeat it.
 # ------------------------------------------------------------------------
 
 add_custom_target(pwshim ALL
@@ -126,12 +131,23 @@ add_custom_target(pwshim ALL
         VERBATIM
 )
 
+# x11rb (x11shim's only dependency) is pure Rust and needs no clang/bindgen
+# or system X11 dev headers, so unlike pwshim there's no extra find_program/
+# pkg_check_modules needed before this target.
+add_custom_target(x11shim ALL
+        COMMAND ${CARGO_EXECUTABLE} build --release
+        WORKING_DIRECTORY ${X11_SHIM_DIR}
+        BYPRODUCTS ${X11_SHIM_LIB}
+        COMMENT "Building X11 desktop-mode shim (Rust static lib)"
+        VERBATIM
+)
+
 # ------------------------------------------------------------------------
 # Step 2: publish the .NET project as a single Native AOT executable,
-# statically linking the Rust shim (see <NativeLibrary> in the .csproj).
+# statically linking the Rust shims (see <NativeLibrary> in the .csproj).
 #
 # Same always-run reasoning as above: dotnet's own build/publish
-# incremental checks won't necessarily notice that libpwshim.a changed
+# incremental checks won't necessarily notice that the .a files changed
 # underneath it, so we always re-publish rather than gate on a file
 # timestamp. dotnet's own caching keeps a no-op publish reasonably fast.
 # ------------------------------------------------------------------------
@@ -148,7 +164,7 @@ add_custom_target(glavasharp ALL
         COMMENT "Publishing GlavaSharp as a single Native AOT executable"
         VERBATIM
 )
-add_dependencies(glavasharp pwshim)
+add_dependencies(glavasharp pwshim x11shim)
 
 # ------------------------------------------------------------------------
 # Convenience: `cmake --install` copies just the final binary somewhere.
@@ -169,7 +185,8 @@ add_custom_command(TARGET glavasharp POST_BUILD
 #
 #   rm -rf build obj bin           (this project's usual out-of-source
 #                                    build dir, plus dotnet's obj/ and bin/)
-#   + the Rust target/ directory   (cargo's build cache, native/pwshim/target)
+#   + the Rust target/ directories (cargo's build caches, native/pwshim/target
+#                                    and native/x11shim/target)
 #
 # Usage (run from anywhere, doesn't require a configured build dir first,
 # since it only shells out to `rm`/`cmake -E rm`):
@@ -183,6 +200,7 @@ add_custom_target(clean-all
         COMMAND ${CMAKE_COMMAND} -E rm -rf ${DOTNET_PROJECT_DIR}/obj
         COMMAND ${CMAKE_COMMAND} -E rm -rf ${DOTNET_PROJECT_DIR}/bin
         COMMAND ${CMAKE_COMMAND} -E rm -rf ${RUST_SHIM_DIR}/target
-        COMMENT "Removing build/, obj/, bin/, and the Rust target/ directory"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf ${X11_SHIM_DIR}/target
+        COMMENT "Removing build/, obj/, bin/, and the Rust target/ directories"
         VERBATIM
 )
