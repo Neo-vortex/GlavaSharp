@@ -31,6 +31,7 @@ instructions. Start with the README if you just want to build and run it.
   - [Configuration (`Shaders/RcConfig.cs`)](#configuration-shadersrcconfigcs)
 - [Design trade-offs](#design-trade-offs)
 - [Building (detailed)](#building-detailed)
+- [Packaging (`packaging/`)](#packaging-packaging)
 - [License](#license)
 
 ---
@@ -69,9 +70,9 @@ essentially unmodified.
 | Shader preprocessor | Full custom C preprocessor (`#request`, `#include`, `#expand`, `@fg:`/`@bg:` compositing, GLava's transform pipeline for FFT/window/gravity/avg as *chained shaders*) | A deliberately small subset (see [below](#shader-preprocessing-shadersglavapreprocessorcs)) — enough to load real GLava module files, not a full reimplementation of every directive |
 | FFT | Runs as GLava's own chained compute-shader "transform" passes (`window` → `fft` → `gravity` → `avg`) on the GPU | Two interchangeable backends, selected with `--fft-device`: a CPU FFT (`CpuFft`, the default) and a single-workgroup GLSL compute-shader FFT (`GpuFft`) that's bit-for-bit equivalent to it — see [FFT](#fft-shaderscpufftcs-shadersgpufftcs) |
 | GPU selection | N/A | `--list-gpus` enumerates DRM render nodes; `--gpu <index>` pins rendering to one — see [GPU selection](#gpu-selection-gpuenumeratorcs) |
-| Distributable artifact | Dynamically linked binary + installed shader/config tree under `/etc/xdg` or `~/.config/glava` | Single self-contained Native AOT executable with the Rust audio shim statically linked in; shader tree ships alongside it, not installed system-wide (yet) |
+| Distributable artifact | Dynamically linked binary + installed shader/config tree under `/etc/xdg` or `~/.config/glava` | Self-contained Native AOT executable with the Rust audio/X11 shims statically linked in, but `build/dist/` itself is still multiple files (GLFW's `libglfw*.so`, dynamically linked, + `shaders/` alongside it, not installed system-wide); `cmake --build build --target appimage` packs that into one real single-file `.AppImage` — see [Packaging](#packaging-packaging) |
 | Desktop-embedded mode (`glava -d` / `setxwintype "desktop"`) | Supported, X11 EWMH-based | **X11/xfwm4 implemented and verified** (`--desktop`, `--desktop-geometry`) — see [Desktop-embedded mode](#desktop-embedded-mode-windowingx11nativecs-nativex11shim); GNOME/Wayland not yet |
-| Module maturity | All bundled modules (bars, radial, circle, graph, wave, ...) are production-quality | `bars`, `radial`, `circle`, `graph`, `wave` all verified working, plus a GlavaSharp-original module (`waterfall`, a scrolling spectrogram) GLava doesn't have — see [Status](#status--roadmap) |
+| Module maturity | All bundled modules (bars, radial, circle, graph, wave, ...) are production-quality | `bars`, `radial`, `circle`, `graph`, `wave` all verified working, plus two GlavaSharp-original modules GLava doesn't have: `waterfall` (a scrolling spectrogram) and `aurora` (a calming ambient desktop visualizer) — see [Status](#status--roadmap) |
 | Build system | Meson (2.x) / legacy Makefile (1.x) | CMake orchestrating `cargo` + `dotnet publish` |
 
 The short version: GlavaSharp is GLava's *shader-facing* design ported onto
@@ -113,6 +114,46 @@ listed here, it's a real bug — please file an issue with the
       color-mapped (blue → cyan → green → yellow → red → white) and
       falling downward as new data arrives. See
       [GlavaSharp-original modules](#glavasharp-original-modules-shadersglavasharp).
+- [x] **`aurora`** (GlavaSharp-original, not part of GLava) — a calming
+      ambient desktop visualizer: soft curtains of color drift upward and
+      sway like the northern lights, fading into a fully transparent
+      background. Reuses the same persistent "history" feedback buffer as
+      `waterfall`, but as a decay+drift loop instead of a hard scroll — no
+      time/clock uniform involved, the motion comes entirely from
+      re-sampling the buffer's own previous frame through a fixed sideways
+      sway each frame. Two bugs found and fixed during initial live
+      testing, both specific to feedback-loop shaders rather than typical
+      GLava modules: (1) the feedback read direction was inverted (sampling
+      *above* instead of *below* the current row), which pulled content
+      down into the injection zone instead of letting it rise, so it never
+      visibly drifted; (2) additively combining the decayed feedback with
+      freshly injected energy, inside the injection zone, is an unbounded
+      integrator (steady state ≈ `injected/(1-DECAY)`, hundreds of times
+      over at a DECAY this close to 1) that clips straight to white within
+      seconds — switched to `max(prev, injected)`, which lets new energy
+      refresh the zone without the two terms compounding. See
+      [GlavaSharp-original modules](#glavasharp-original-modules-shadersglavasharp).
+- [x] **`aurora` rewritten into a curl-noise-driven volumetric sim —
+      something GLava's own module format has no path to at all.** The
+      original single-sine-sway version above still works exactly as
+      described, but the current `aurora.glsl`/`1.frag`/`2.frag`/`noise.glsl`
+      go considerably further: a real (divergence-free) curl-noise flow
+      field with domain warping stands in for the one sine wave, blended
+      across three differently-tuned virtual layers for a parallax look,
+      sampled anisotropically along the local flow direction so feedback
+      reads as *transported* rather than blurred, separated chromatically
+      for a faint prismatic trailing edge, and thinned along
+      high-curl regions so curtains fray into branching filaments instead
+      of staying one solid sheet — still with **zero time/clock uniform
+      anywhere in the pipeline** and **zero new host-side plumbing**: it's
+      still just the one `history` buffer `waterfall` already established,
+      read back through a much richer static field. Every bundled GLava
+      module redraws from scratch every frame with no persistent state at
+      all, and the shipped GLava shader tree has no noise/FBM/curl
+      primitives anywhere in it — this isn't a GLava feature ported over,
+      it's a category of effect GLava's format has no mechanism to express.
+      Full technique breakdown in
+      [GlavaSharp-original modules](#glavasharp-original-modules-shadersglavasharp).
 - [ ] GLava's `#request transform ...` pipeline (chaining `window`/`fft`/
       `gravity`/`avg` as GPU shader passes) isn't implemented — GlavaSharp
       does windowing/FFT/gravity natively in `CpuFft`/`GpuFft` instead.
@@ -151,6 +192,38 @@ listed here, it's a real bug — please file an issue with the
       real-world mileage. `CpuFft` remains the default (`--fft-device
       cpu`); pass `--fft-device gpu` to try it. See
       [FFT](#fft-shaderscpufftcs-shadersgpufftcs).
+- [x] **Bug found and fixed: bass reads as static/underused, treble as
+      disproportionately "active," across every module.** Root cause:
+      every module's `util/smooth.glsl` maps screen position to a raw,
+      *linearly-spaced* FFT bin via `scale_audio`'s log-ish warp
+      (`-log(1 - SAMPLE_RANGE*idx) / SAMPLE_SCALE`). With the stock
+      constants, that warp's slope is nearly flat near `idx=0` -- a wide
+      swath of screen space samples nearly the *same* few bass bins, which
+      reads as static even though that's where the real energy is -- and
+      steep near `idx=1`, where adjacent screen positions sample
+      meaningfully different (sparser, noisier) high bins, which reads as
+      "active" from frame-to-frame variance alone regardless of actual
+      magnitude. Confirmed live: `bars --freq-scale linear` (the old,
+      only, behavior) showed real bar height in roughly the first 5 of ~30
+      visible bars, everything past that reading as flat, against
+      broadband pink noise. Fixed with proper perceptual bucketing instead
+      of retuning the existing warp's constants: raw FFT bins are now
+      redistributed by actual frequency (Hz), on a user-selectable
+      perceptual scale (`--freq-scale log2` default, or `mel`/`bark`/`erb`;
+      `linear` keeps the old raw-bin behavior), *before* any shader sees
+      them -- see [FFT](#fft-shaderscpufftcs-shadersgpufftcs) for the
+      bucket-edge math and why it lives once, shared by both `CpuFft` and
+      `GpuFft`, rather than in GLSL. Since the redistribution now happens
+      upstream, `util/smooth.glsl`'s own warp has to become a no-op or it'd
+      warp the (already-correctly-spaced) spectrum a second time -- gated
+      behind a new GlavaSharp-original `_FREQ_PREBUCKETED` macro (same
+      injection mechanism as `_USE_ALPHA`), defaulting to today's exact
+      behavior unless a module was compiled with bucketing active. Verified
+      live: `bars --freq-scale log2` against the same pink-noise signal
+      showed real, varied bar height across roughly 30 bars instead of 5,
+      and all seven bundled/original modules (`bars`, `radial`, `circle`,
+      `graph`, `wave`, `waterfall`, `aurora`) still compile+link cleanly
+      across all five `--freq-scale` values.
 
 ### Desktop-embedded mode
 
@@ -367,6 +440,27 @@ listed here, it's a real bug — please file an issue with the
       to the executable (or wherever `--shaders` points); it doesn't yet
       look in `~/.config/glavasharp` the way GLava looks in
       `~/.config/glava`.
+- [x] **Bug found and fixed: "single self-contained executable" was only
+      true of the one `GlavaSharp` file, not the directory you'd actually
+      need to distribute.** `ls build/dist/` shows `GlavaSharp`,
+      `GlavaSharp.dbg`, `libglfw.so.3.3`, `libglfw-wayland.so.3.3`, and
+      `shaders/` — Native AOT statically links the Rust shims
+      (pwshim/x11shim) but not GLFW (OpenTK's native GLFW package is
+      dynamically loaded), and the shader tree was always meant to ship
+      alongside rather than be embedded (see
+      [Shader module pipeline](#shader-module-pipeline-shadersshadermodulecs)).
+      Not a regression, just a README claim ("single self-contained
+      executable ... no sibling `.so` files to lose track of") that didn't
+      match what `build/dist/` actually contained. Fixed by adding a
+      packaging step rather than re-architecting the linking: `cmake
+      --build build --target appimage` (`packaging/build-appimage.sh`)
+      packs `build/dist/` into one real single-file AppImage via
+      `appimagetool` — see [Packaging](#packaging-packaging) for the full
+      writeup, including the `.desktop`-file validation gotcha
+      (`Categories=` needs registered/`X-`-prefixed values) hit during
+      setup. Verified live: `GlavaSharp-x86_64.AppImage --module aurora`,
+      run from `/tmp` (nowhere near the repo), correctly resolved and
+      compiled shaders from its own FUSE mount point.
 
 ## Architecture
 
@@ -510,6 +604,58 @@ stay on the CPU; the O(N log N) butterfly work happens on the GPU. It's
 opt-in today (pass `--fft-device gpu`) — see [Status](#status--roadmap)
 for the two driver-level bugs already found and fixed during bring-up.
 
+#### Perceptual frequency bucketing (`Shaders/FrequencyBucketing.cs`)
+
+Both backends produce a raw, linearly-spaced spectrum (bin `i`'s center
+frequency is `i * sampleRate / N`) straight out of the FFT math above.
+`FrequencyBucketing` sits between that and gravity smoothing (in both
+`CpuFft.Process` and `GpuFft.Process` — one shared implementation instead
+of duplicating it per backend) and redistributes it onto a perceptual
+scale, selected via `--freq-scale` (`FftSettings.Scale`):
+
+- **`log2`** (default) — octave spacing, `forward(f) = log2(f)`. Simplest
+  perceptual scale; each bucket covers a fixed frequency *ratio*, not a
+  fixed span.
+- **`mel`** — O'Shaughnessy's closed-form fit to the classic
+  Stevens/Volkmann/Newman pitch-matching data; standard in speech/ML
+  feature extraction.
+- **`bark`** — Traunmüller's closed-form approximation of Zwicker's 24
+  critical bands. Chosen over Zwicker's own atan-based formula specifically
+  because it has a simple closed-form inverse (needed to turn evenly-spaced
+  points *on* the scale back into Hz bucket edges); it's a standard,
+  widely-cited approximation of the same underlying scale, not a different
+  one.
+- **`erb`** — Glasberg & Moore's ERB-rate scale, the current standard for
+  computational auditory modeling; resolves roughly 4x finer than Bark
+  below ~500Hz, which is exactly where a linear or naive-log axis distorts
+  bass-heavy music the most.
+- **`linear`** — bucketing disabled; raw FFT bins pass straight through
+  bin-for-bin, GlavaSharp's original (buggy, see
+  [Status](#status--roadmap)) behavior, kept as an explicit opt-out.
+
+For each output bucket, `FrequencyBucketing`'s constructor precomputes
+(once, not per-frame) a Hz range from the chosen scale's forward/inverse
+functions, converts that to a raw-bin-index range, and stores either: an
+inclusive `[loBin, hiBin]` pair when 2+ raw bins fall in range, or a single
+fractional center-bin position when the bucket is narrower than one raw
+bin (unavoidable at the low end on any perceptual scale with a modest FFT
+size — standard technique, not specific to this implementation). `Apply`
+(called every frame) then either takes the **max** across the bin range
+(preserves peaks — a single loud harmonic in a bucket spanning many quiet
+bins should still read as loud; averaging would blur transients) or
+linearly interpolates between the two bins nearest the fractional center.
+
+Since this redistribution happens *before* any shader sees the spectrum,
+`util/smooth.glsl`'s own `scale_audio` — which every module's
+`smooth_audio` calls to map screen position to bin index, and which
+applies its own log-ish warp — has to skip that warp when bucketing is
+active, or it would warp an already-correctly-spaced spectrum a second
+time. `ShaderModule` injects a `_FREQ_PREBUCKETED` macro (same mechanism as
+`_USE_ALPHA`, see [Shader module pipeline](#shader-module-pipeline-shadersshadermodulecs))
+based on `FftSettings.Scale`, and `scale_audio` becomes an identity
+pass-through when it's set. See [Status](#status--roadmap) for the bug
+this whole mechanism was built to fix.
+
 ### GPU selection (`GpuEnumerator.cs`)
 
 `--list-gpus` enumerates the system's DRM render nodes and prints an
@@ -624,8 +770,7 @@ buffer; the two swap roles every frame. A later pass in the same module
 reads the just-written buffer as its own `#request uniform "prev"`
 texture, same as any other multi-pass chain.
 
-**`waterfall`** (the current — and so far only — module here) uses this
-for a scrolling spectrogram:
+**`waterfall`** uses this for a scrolling spectrogram:
 
 - `1.frag` (the history/accumulate pass): for the topmost row of the
   history texture, it samples the current spectrum (both channels,
@@ -640,6 +785,158 @@ for a scrolling spectrogram:
 
 Verified live: a proper scrolling, color-mapped spectrogram reacting to
 real audio — see [Status](#status--roadmap).
+
+**`aurora`** uses the same persistent buffer completely differently: not a
+hard scroll, but a decaying feedback loop, tuned for a calming ambient
+desktop backdrop rather than a literal spectrum readout. Its first version
+read last frame's buffer at `uv - vec2(sway, DRIFT_SPEED)` — a smaller Y
+(so whatever was *below* this row rises into it) offset sideways by
+`sway = sin(uv.y * SWAY_FREQ * 2π) * SWAY_AMOUNT`, a fixed function of Y
+alone. Since a given parcel of color's Y position changes every frame as it
+drifts upward, it passed through a different sway value each step, tracing
+an S-curve as it rose — organic-looking motion with no time/clock uniform
+anywhere, purely from feedback (the buffer's own history *is* the state).
+That's still exactly how the module stays animated with zero host-side
+plumbing beyond the `history` mechanism above; what's changed is *what*
+stands in for that one sine wave.
+
+#### Why this is a different category of effect than anything in GLava
+
+Every bundled GLava module redraws its output from scratch every single
+frame — GLava's format has no concept of a value that survives between
+frames at all (`history` is a GlavaSharp-original extension precisely
+*because* nothing like it exists upstream). `waterfall` already stretches
+that as far as a literal accumulator goes (shift a buffer down a row,
+stamp a new one on top). `aurora` goes somewhere GLava's module format has
+no path to reach regardless of how many `#request`s or passes you throw at
+it: a real, mathematically fluid-like simulation, running entirely off
+repeated spatial feedback through procedural noise fields, with the
+*entire* animation state living in one 1024×512 RGBA texture and not one
+extra uniform. The bundled GLava shader tree (`shaders/glava/`) has no
+noise, FBM, curl, or domain-warp primitives anywhere in it — `noise.glsl`
+(new, GlavaSharp-original) is the first thing in this codebase that needed
+them, and it exists specifically because nothing upstream does this.
+
+`noise.glsl` supplies the actual math, all of it deliberately time-free —
+motion still has to emerge purely from re-sampling history through a
+*fixed* field, never from an evolving one:
+
+- **`valueNoise`** — quintic-interpolated (not cubic) value noise. The
+  quintic blend has a zero second derivative at cell boundaries; that
+  specifically matters here because `curlNoise` differentiates this
+  function a second time, and cubic interpolation's visible
+  second-derivative discontinuities would show up as faint creases right
+  on the grid lines once curled.
+- **`fbm`** — fractal Brownian motion (layered noise octaves), each octave
+  rotated by a fixed non-axis-aligned matrix before scaling up. Without
+  that rotation, octaves stack on the same grid axes and the sum reads as
+  a recognizable plaid/tiled pattern rather than genuine irregularity.
+- **`curlNoise`** — the curl of an FBM potential field, via central
+  differences. Curling a potential this way *guarantees* a
+  divergence-free vector field — the specific property that makes
+  curl-driven flow look like real fluid instead of "noisy wobble": raw
+  gradient-following noise visibly sucks material into low points or blows
+  it apart from high points, while a curl field only ever swirls things
+  around one another, never sourcing or sinking. That swirl-not-leak
+  behavior is most of what actually reads as organic fluid motion.
+- **`domainWarp`** — pushes a sample point through *two* rounds of FBM
+  (fbm-of-fbm) before the caller uses it, so the warp has internal
+  structure (folds within folds) instead of one uniform wobble applied
+  everywhere. This is the specific technique behind the
+  folding/stretching/tearing look real aurora curtains have, as opposed to
+  a flat sheared gradient.
+
+`1.frag`'s feedback pass then builds several techniques on top of that
+field, each addressing a specific way naive feedback-through-noise reads
+as fake:
+
+- **Depth-weighted virtual layering.** `ShaderModule` only gives a module
+  one persistent history buffer (a second/third *literally* independent
+  persistent layer would need host-side changes — extra `#request uniform
+  "history"` targets and matching ping-pong buffers in `ShaderModule.cs`).
+  Instead, every frame's feedback read is a blend of `NUM_VLAYERS=3`
+  virtual layers, each with its own decay/drift/sway-frequency/noise-scale/
+  warp-strength/hue, sampled at its own flow-warped offset and combined by
+  `LAYER_WEIGHT` (which sums to 1, so blending — unlike naive addition —
+  can't runaway-brighten). Gets the layered-parallax look multi-layer
+  aurora photography has, without the layers being independently
+  addressable render targets.
+- **Per-column drift variation.** A slow, x-only value-noise field (one
+  per layer, offset so layers don't share the same lagging columns) speeds
+  up or slows down each column's rise independently. Without it, every
+  column in a layer rises in perfect lockstep — the single clearest tell
+  that a "fluid" effect is actually a uniform scroll with noise sprinkled
+  on top.
+- **Anisotropic streak sampling.** Rather than one isotropic texture read
+  per layer, `anisoSample` walks a short line of samples along the local
+  flow direction (from that layer's curl vector) and weights them so the
+  center dominates. A single isotropic sample makes feedback look
+  *smeared*; sampling along the direction it's actually moving makes it
+  look *transported* — the single highest-impact change for reading as
+  fluid rather than blurred.
+- **Chromatic feedback separation.** R and B are read with a tiny offset
+  along (resp. against) the local flow direction from G/A, so fast-moving
+  color picks up a faint prismatic leading/trailing edge instead of
+  staying perfectly achromatic as it moves — kept small enough to be a
+  trailing-edge cue, not a chromatic-aberration filter.
+- **Filament thresholding.** Where the local flow magnitude is high
+  (chaotic, fast-changing curl), a layer's contribution is thinned rather
+  than left fully opaque, via `smoothstep` against `FILAMENT_THRESHOLD`.
+  This is what breaks a solid curtain into branching strands that split
+  and rejoin, instead of one continuous sheet.
+- **Band-split audio response.** Bass, mid, and treble (banded averages
+  of `smooth_audio` over three spectrum ranges — a banded average, not a
+  single sample point, so one loud bin can't make a whole band flicker)
+  each drive a *different kind* of visual response rather than everything
+  pulsing together: bass boosts vertical drift speed and injection height,
+  mid drives turbulence/warping (feeding `domainWarp`'s strength and a
+  fold applied to the injection silhouette's own x-sampling), treble drives
+  fine shimmer (noise modulating injected energy) and sparkles.
+- **Sparkles.** Sparse, sharp bright points gated to only appear where
+  treble is present *and* the ribbon already has presence (so they read as
+  glints, not random static), hashed from a grid position that's itself
+  been pushed through a cheap low-octave curl sample — so sparkles visibly
+  drift and swirl with the current instead of twinkling fixed in place.
+- **Temporal sharpening / nonlinear persistence.** Pure `prev * decay`
+  feedback slowly turns to visual mush, because bilinear sampling of
+  `hist` blends neighboring colors together every single frame and that
+  blur compounds over hundreds of frames. Nudging HSV saturation back up
+  and gamma-sharpening alpha each pass counteracts that drift without
+  needing a whole extra unsharp-mask pass.
+- **Compositional + dynamic coloring.** The hand-authored palette gradient
+  is unchanged, but it's no longer sampled once and used directly:
+  *which part* of the gradient gets sampled shifts with the bass/treble
+  balance (bass-heavy moments pull toward teal/green, treble-heavy moments
+  push toward violet/pink), and on top of that, hue is nudged by altitude
+  and local flow speed (not time — avoids rainbow-cycling) so two ribbons
+  at the same x but different height/speed/loudness read as distinguishably
+  different colors instead of identical gradient copies.
+
+`2.frag`'s display pass adds a few cheap, high-impact finishing touches:
+
+- **Dual-radius bloom with edge highlighting piggybacked on the same
+  fetches.** `sampleNeighborhood` reads an 8-neighbor ring at a given
+  radius once, returning both the averaged bloom color *and* a
+  luminance-gradient magnitude across those same taps (a cheap stand-in
+  for a proper Sobel kernel, which would need its own fetch grid) — a
+  thin bright rim right where brightness changes sharply is what reads as
+  "a lit, three-dimensional sheet" rather than a flat blurry blob, and it
+  costs nothing extra since it reuses the bloom ring's reads.
+- **A fixed starfield** in the empty sky — hash-thresholded per grid cell
+  with a second hash for per-star brightness variance, masked out
+  anywhere the aurora already has presence. No time uniform in this pass
+  either, so stars are a still backdrop, not a twinkling one.
+- **Atmospheric haze** — a faint cool tint that grows with height via
+  `smoothstep`, standing in for the "higher = further into the sky, so
+  fainter/cooler" aerial-perspective depth cue real aurora photography
+  has.
+
+Verified live (screenshots against a synthetic pink-noise signal, both
+before and after this rewrite): color correctly rises, folds, and frays
+without the earlier runaway-brightness bug; exact pacing (per-layer decay/
+drift/sway, band-response strengths, bloom/haze/star tunables, all in
+`aurora.glsl`) is meant to be tuned to taste against real music, the same
+as any other module's `#define` constants.
 
 ### Windowing (`Windowing/AppWindow.cs`)
 
@@ -793,10 +1090,10 @@ has no effect.
 Requires: .NET 10 SDK, a Rust toolchain (via [rustup](https://rustup.rs)),
 `clang`/`libclang-dev` (for PipeWire's bindgen-based bindings, needed by
 `native/pwshim` only — `native/x11shim` is pure Rust and needs no system
-dev headers at all), and `libpipewire-0.3-dev`. On Ubuntu/Debian:
+dev headers at all), and `libpipewire-0.3-dev`. On Ubuntu:
 
 ```bash
-sudo apt install libpipewire-0.3-dev pkg-config clang libclang-dev cmake
+sudo apt install dotnet-sdk-10.0 libpipewire-0.3-dev pkg-config clang libclang-dev cmake
 ```
 
 Then:
@@ -804,7 +1101,8 @@ Then:
 ```bash
 cmake -S . -B build
 cmake --build build
-# -> build/dist/GlavaSharp
+# -> build/dist/GlavaSharp (+ libglfw*.so + shaders/ alongside it --
+#    see Packaging below for turning this into one actual file)
 ```
 
 `CMakeLists.txt` orchestrates two `cargo build --release` invocations
@@ -836,6 +1134,66 @@ calls need the statically-linked AOT build to resolve; without it they'll
 throw `DllNotFoundException` trying to `dlopen` a `.so` that doesn't
 exist. Use it for editing/compiling C# quickly; use the full `cmake
 --build build` flow to actually run GlavaSharp.
+
+## Packaging (`packaging/`)
+
+`build/dist/` — Native AOT's idea of "self-contained" — is a directory,
+not a file: `GlavaSharp` (the pwshim/x11shim Rust static libs *are* linked
+in here), `GlavaSharp.dbg` (debug symbols, split out separately), and two
+files Native AOT doesn't and can't statically link — `libglfw.so.3.3` /
+`libglfw-wayland.so.3.3`, OpenTK's GLFW native package, dynamically loaded
+at startup — plus `shaders/`, deliberately shipped alongside rather than
+embedded (see [Shader module pipeline](#shader-module-pipeline-shadersshadermodulecs) —
+modules are loaded from disk by directory, not compiled in). None of that
+is a bug; it just means "single self-contained executable" was only ever
+true of the one `GlavaSharp` file itself, not the directory you actually
+need to hand someone.
+
+`cmake --build build --target appimage` (`packaging/build-appimage.sh`,
+not part of the default `ALL` build since it needs network access on first
+run) packs all of it into one real single-file `.AppImage`:
+
+- Assembles `build/AppDir/` from `build/dist/` verbatim (minus
+  `GlavaSharp.dbg` — debug symbols aren't needed to run, and bloat the
+  AppImage by more than the rest of it combined) under `usr/bin/`, plus
+  `packaging/appimage/`'s `AppRun` (a thin argv-passthrough script),
+  `GlavaSharp.desktop`, and `glavasharp.png` — a static 2D reduction of the
+  `aurora` module's own look (layered wavy curtains colored by altitude,
+  soft bloom, a starfield, atmospheric haze — see
+  [GlavaSharp-original modules](#glavasharp-original-modules-shadersglavasharp)
+  for what it's echoing), generated by
+  `packaging/appimage/generate-icon.py` (numpy + Pillow, not a build
+  dependency otherwise — rerun by hand and re-commit the PNG to retune it,
+  it isn't regenerated as part of `cmake --build build --target appimage`).
+- Fetches `appimagetool` from its GitHub releases on first run (cached
+  under `build/tools/` afterwards) and runs it against `build/AppDir/`.
+- Runs `appimagetool` itself with `APPIMAGE_EXTRACT_AND_RUN=1` — it's
+  shipped as an AppImage too, which would otherwise try to FUSE-mount
+  itself, and not every machine running this build has `/dev/fuse`
+  available (many CI containers don't). This only affects how
+  `appimagetool` runs during packaging; the `GlavaSharp` AppImage this
+  produces supports both FUSE-mount and `--appimage-extract-and-run` for
+  whoever runs it later, same as any AppImage.
+
+Why `AppRun` needs no logic beyond an argv passthrough: `Program.cs`
+resolves the shader tree via `AppContext.BaseDirectory` (wherever the
+running executable actually lives), and `libglfw*.so` resolution is
+already relative to that same directory today (confirmed live — running
+`build/dist/GlavaSharp` directly, with no `LD_LIBRARY_PATH` set, already
+finds `libglfw.so.3.3` sitting right next to it). Since
+`packaging/build-appimage.sh` preserves that exact same relative layout
+inside `AppDir/usr/bin/`, both keep resolving correctly once mounted —
+verified live: `GlavaSharp-x86_64.AppImage --module aurora`, run from
+`/tmp` (nowhere near the actual repo), logged shader paths resolving under
+its own FUSE mount point (`/tmp/.mount_.../usr/bin/shaders/...`) and
+compiled/linked normally.
+
+The `.desktop` file exists because `appimagetool` requires (and validates)
+one — `Categories=` values have to be real freedesktop.org registered
+categories or prefixed `X-`; an early attempt using `Visualization`
+unprefixed failed validation. `Terminal=true` since GlavaSharp is
+fundamentally CLI-flag-driven (`--desktop`, `--module`, ...), not a
+double-click GUI app with no arguments to pass.
 
 ## License
 
