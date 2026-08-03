@@ -204,3 +204,21 @@ add_custom_target(clean-all
         COMMENT "Removing build/, obj/, bin/, and the Rust target/ directories"
         VERBATIM
 )
+
+# ------------------------------------------------------------------------
+# `appimage` — packs ${PUBLISH_DIR} (GlavaSharp + libglfw*.so + shaders/,
+# see packaging/build-appimage.sh) into one AppImage file. NOT part of the
+# default ALL build: it fetches appimagetool from GitHub on first run
+# (cached under build/tools/ afterwards), which the plain `glavasharp`
+# target deliberately doesn't require just to build and run locally.
+#
+# Usage: cmake --build build --target appimage
+# ------------------------------------------------------------------------
+
+add_custom_target(appimage
+        COMMAND ${CMAKE_SOURCE_DIR}/packaging/build-appimage.sh
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Packing GlavaSharp into a single-file AppImage"
+        VERBATIM
+)
+add_dependencies(appimage glavasharp)

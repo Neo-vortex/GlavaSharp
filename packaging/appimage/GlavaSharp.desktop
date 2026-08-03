@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=GlavaSharp
+Comment=Audio-reactive OpenGL visualizer (GLava's shader ecosystem, C#/.NET)
+Exec=GlavaSharp
+Icon=glavasharp
+Categories=AudioVideo;Audio;
+Terminal=true

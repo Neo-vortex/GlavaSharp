@@ -1,0 +1,10 @@
+#!/bin/sh
+# AppImage entry point -- the AppImage runtime execs this after mounting
+# (or extracting) the AppDir. GlavaSharp itself resolves its shader tree via
+# AppContext.BaseDirectory (see Program.cs), so as long as usr/bin/shaders/
+# stays alongside usr/bin/GlavaSharp -- which packaging/build-appimage.sh
+# guarantees by copying build/dist/ verbatim -- no env vars need setting
+# here; this is deliberately a thin argv passthrough, not a wrapper with
+# its own logic to keep in sync.
+HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec "$HERE/usr/bin/GlavaSharp" "$@"
