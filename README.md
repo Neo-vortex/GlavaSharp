@@ -45,17 +45,21 @@ actually looks like breathing)</sub>
 
 <table>
 <tr>
-<td align="center" width="34%">
-  <img src="docs/screenshots/radial.png" width="260" alt="radial module: a circular spectrum burst" /><br/>
+<td align="center" width="25%">
+  <img src="docs/screenshots/radial.png" width="220" alt="radial module: a circular spectrum burst" /><br/>
   <sub><b>radial</b> — a circular burst, GLava's own</sub>
 </td>
-<td align="center" width="34%">
-  <img src="docs/screenshots/bars.png" width="260" alt="bars module: a classic vertical spectrum" /><br/>
+<td align="center" width="25%">
+  <img src="docs/screenshots/bars.png" width="220" alt="bars module: a classic vertical spectrum" /><br/>
   <sub><b>bars</b> — the classic, GLava's own</sub>
 </td>
-<td align="center" width="34%">
-  <img src="docs/screenshots/waterfall.jpg" width="260" alt="waterfall module: a scrolling heat-mapped spectrogram" /><br/>
+<td align="center" width="25%">
+  <img src="docs/screenshots/waterfall.jpg" width="220" alt="waterfall module: a scrolling heat-mapped spectrogram" /><br/>
   <sub><b>waterfall</b> — a scrolling spectrogram, GlavaSharp original</sub>
+</td>
+<td align="center" width="25%">
+  <img src="docs/screenshots/clock.gif" width="220" alt="clock module: an analog clock face with hour, minute, and second hands over a radial spectrum, hands thickening and glowing with bass/mid/treble" /><br/>
+  <sub><b>clock</b> — hands driven by the system clock, GlavaSharp original</sub>
 </td>
 </tr>
 </table>

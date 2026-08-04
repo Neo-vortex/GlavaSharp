@@ -112,11 +112,11 @@ void main() {
     /* Hour: thick and slow, so it only reacts to the thing that's actually
        slow and heavy -- bass. */
     c = drawHand(fragPos, center, hourAngle, C_RADIUS * 0.50,
-        4.0 + bass * 2.5 * react, 7.0, bass * 0.6 * react, vec4(0, 0, 0, 1), c);
+        4.0 + bass * 2.5 * react, 7.0, bass * 0.6 * react, vec4(1, 1, 1, 1), c);
 
     /* Minute: mid frequencies. */
     c = drawHand(fragPos, center, minuteAngle, C_RADIUS * 0.80,
-        3.0 + mid * 2.0 * react, 6.0, mid * 0.5 * react, vec4(0, 0, 0, 1), c);
+        3.0 + mid * 2.0 * react, 6.0, mid * 0.5 * react, vec4(0.7, 0.7, 0.78, 1), c);
 
     /* Second: already the most "alive" hand visually (thin, always
        sweeping) -- gets the most dramatic reaction, tied to overall energy
