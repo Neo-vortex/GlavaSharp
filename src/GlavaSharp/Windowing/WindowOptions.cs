@@ -65,4 +65,31 @@ public sealed class WindowOptions
     ///     is false.
     /// </summary>
     public int? DesktopMonitorIndex { get; init; }
+
+    /// <summary>
+    ///     Whether <see cref="AppWindow" /> starts the live control channel
+    ///     (<see cref="Control.ControlServer" />) at all -- <c>--no-control</c>
+    ///     on the CLI. Independent of <see cref="DesktopMode" />: the control
+    ///     server is a plain background HTTP listener with no dependency on
+    ///     which windowing mode is active.
+    /// </summary>
+    public bool ControlEnabled { get; init; } = true;
+
+    /// <summary>
+    ///     Control channel bind host -- <c>--control-bind</c> on the CLI.
+    ///     Defaults to loopback-only; set to e.g. <c>0.0.0.0</c> to allow LAN
+    ///     access (e.g. tweaking from a phone/tablet). No authentication --
+    ///     anyone who can reach this host:port can change any registered
+    ///     property, so only widen this on a network you trust.
+    /// </summary>
+    public string ControlBindHost { get; init; } = "127.0.0.1";
+
+    /// <summary>Control channel port -- <c>--control-port</c> on the CLI.</summary>
+    public int ControlPort { get; init; } = 8642;
+
+    /// <summary>
+    ///     Whether <see cref="Shaders.ShaderModule" /> watches its shader
+    ///     files and recompiles on save -- <c>--no-hot-reload</c> on the CLI.
+    /// </summary>
+    public bool HotReloadEnabled { get; init; } = true;
 }

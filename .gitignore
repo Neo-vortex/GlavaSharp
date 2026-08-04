@@ -9,6 +9,9 @@ src/**/obj/
 # Rust / Cargo
 native/**/target/
 
+# MkDocs build output
+docs-site/site/
+
 # IDEs
 .idea/
 .vs/

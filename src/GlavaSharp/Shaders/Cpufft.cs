@@ -35,13 +35,17 @@ public sealed class CpuFft : IFft
 {
     // Gravity: rises fast (attack), falls slowly (decay) — same feel as
     // GLava's util/gravity_pass.frag. Sourced from FftSettings so the CLI
-    // (and rc.glsl, where GLava has an equivalent) can tune these.
-    private readonly float _attack;
+    // (and rc.glsl, where GLava has an equivalent) can tune these. Not
+    // readonly: SetAttack/SetDecay/SetGain (see IFft) let the live control
+    // channel tune them without a restart. These are only ever set from the
+    // render thread (PropertyStore.DrainPending's contract), same thread
+    // Process reads them on, so plain field writes need no lock.
+    private float _attack;
     private readonly int[] _bitRev;
     private readonly float[] _cosTable, _sinTable; // twiddle factors, one full period at N resolution
-    private readonly float _decay;
-    private readonly float _gain;
-    private readonly float _invLogGain; // 1 / log(1 + gain), hoisted out of the per-bin hot loop
+    private float _decay;
+    private float _gain;
+    private float _invLogGain; // 1 / log(1 + gain), hoisted out of the per-bin hot loop -- recomputed by SetGain
 
     private readonly float[] _hann;
 
@@ -151,6 +155,15 @@ public sealed class CpuFft : IFft
         //nothing to release for cpu fft.
     }
 
+    public void SetAttack(float attack) => _attack = attack;
+    public void SetDecay(float decay) => _decay = decay;
+
+    public void SetGain(float gain)
+    {
+        _gain = gain;
+        _invLogGain = 1f / MathF.Log(1f + gain);
+    }
+
     /// <summary>
     ///     Runs one FFT for interleaved stereo PCM (length &gt;= N*2), windows
     ///     it, perceptually rebuckets the raw N/2-bin spectrum if
@@ -204,6 +217,21 @@ public sealed class CpuFft : IFft
         }
 
         return (_smoothL, _smoothR);
+    }
+
+    /// <summary>
+    ///     CPU backend has nothing GPU-resident to skip -- this is just
+    ///     <see cref="Process" /> followed by uploading its result, same as
+    ///     what <see cref="Windowing.AppWindow" /> used to do inline before
+    ///     <see cref="ProcessToTexture" /> existed. Kept here (rather than
+    ///     left for the caller) so both backends share the same call shape.
+    /// </summary>
+    public void ProcessToTexture(ReadOnlySpan<float> interleavedStereo, AudioSpectrumTexture textureL,
+        AudioSpectrumTexture textureR)
+    {
+        var (left, right) = Process(interleavedStereo);
+        textureL.Upload(left);
+        textureR.Upload(right);
     }
 
     /// <summary>

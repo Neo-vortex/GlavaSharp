@@ -107,7 +107,9 @@ const float LAYER_HUE[3]         = float[3](0.0, 0.06, -0.05);
    x-samples so ribbons don't peak in lockstep) and overall injection
    shape. */
 #define NBANDS 3
-#define AMPLIFY 2.6
+// AMPLIFY used to be a #define here -- now a live-tweakable uniform (see
+// #request property in 1.frag) instead, so overall injection brightness can
+// be adjusted from the live control channel without recompiling anything.
 #define INJECT_HEIGHT 0.16
 
 /* Nonlinear persistence: feedback that's pure `prev * decay` slowly turns

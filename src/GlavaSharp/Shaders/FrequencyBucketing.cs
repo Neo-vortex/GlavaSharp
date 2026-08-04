@@ -80,6 +80,24 @@ public sealed class FrequencyBucketing
 
     public int BucketCount { get; }
 
+    /// <summary>
+    ///     Exposes the same per-bucket (loBin, hiBin, centerBinF) map <see cref="Apply" />
+    ///     uses, for <see cref="GpuFft" /> to upload once at construction so its
+    ///     bucketing compute pass can reproduce this class's max/lerp logic on
+    ///     the GPU instead of reading raw bins back to the CPU first. loHi.y &gt;
+    ///     loHi.x (a real multi-bin range) means "max over [loHi.x, loHi.y]";
+    ///     otherwise (loHi.y &lt;= loHi.x) fall back to lerping around
+    ///     centerBinF[b] -- same two branches as <see cref="Apply" />.
+    /// </summary>
+    public void CopyBucketMap(Span<(int lo, int hi)> loHi, Span<float> centerBinF)
+    {
+        for (var b = 0; b < BucketCount; b++)
+        {
+            loHi[b] = (_map[b].LoBin, _map[b].HiBin);
+            centerBinF[b] = _map[b].CenterBinF;
+        }
+    }
+
     /// <summary>Fills <paramref name="output" /> (length <see cref="BucketCount" />) from <paramref name="rawBins" /> (length rawBinCount, as passed to the constructor).</summary>
     public void Apply(ReadOnlySpan<float> rawBins, Span<float> output)
     {

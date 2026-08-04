@@ -8,18 +8,16 @@
 GlavaSharp listens to your system audio and turns it into a live OpenGL
 visualizer — spectrum bars, a radial burst, a scrolling heat-mapped
 spectrogram, or a slow-drifting aurora that can sit pinned behind your
-desktop icons like ambient wallpaper. It's a from-scratch C#/.NET
-rebuild of [GLava](https://github.com/jarcode-foss/glava)'s rendering
-model, because GLava's shader ecosystem (the module/`rc.glsl`/`#request`
-convention) is genuinely well designed and deserved a home on a more
+desktop icons like ambient wallpaper. It's a from-scratch C#/.NET rebuild
+of [GLava](https://github.com/jarcode-foss/glava)'s rendering model: same
+well-designed module/`rc.glsl`/`#request` shader convention, on a more
 portable, memory-safe host.
 
-**Status: early alpha.** It runs, it renders, and the core pipeline is
-solid — but this is a project still finding its edges, not a polished
-GLava replacement yet. See
-**[TECHNICAL.md's status checklist](TECHNICAL.md#status--roadmap)** for
-the honest, warts-and-all breakdown of what's done, what's shaky, and
-exactly how every known quirk was (or wasn't yet) fixed.
+**Status: early alpha.** It runs and renders, and the core pipeline is
+solid, but this isn't a polished GLava replacement yet. See the
+**[Status & Roadmap](https://neo-vortex.github.io/GlavaSharp/status-roadmap/)**
+page for the full, warts-and-all breakdown of what's done, what's shaky,
+and how every known quirk was (or wasn't yet) fixed.
 
 > GlavaSharp is an independent reimplementation and is not affiliated
 > with or endorsed by the GLava project.
@@ -74,35 +72,39 @@ Plus `circle`, `graph`, and `wave` straight from GLava's own tree — see
   frame.
 - Runs GLava's own shader modules essentially unmodified: `bars`,
   `radial`, `circle`, `graph`, `wave` — same `rc.glsl`/module-directory
-  convention GLava uses, same shader files.
-- Plus two modules GLava doesn't have: **`waterfall`**, a scrolling,
-  color-mapped spectrogram (frequency history over time), and **`aurora`**,
-  the calming ambient visualizer above.
-- Two interchangeable FFT backends: a CPU FFT (default, works everywhere)
-  and a GPU compute-shader FFT (`--fft-device gpu`).
+  convention, same shader files.
+- Plus three GlavaSharp-original modules: **`waterfall`**, a scrolling
+  color-mapped spectrogram; **`aurora`**, the calming ambient visualizer
+  above; and **`clock`**, an analog clock face over an ordinary radial
+  spectrum, hands driven live by the system clock.
+- Two interchangeable FFT backends: CPU (default, works everywhere) and
+  a GPU compute-shader FFT (`--fft-device gpu`).
 - Perceptual frequency bucketing (`--freq-scale log2|mel|bark|erb|linear`,
-  default `log2`) — redistributes the raw FFT spectrum onto a scale that
-  matches how humans actually resolve pitch, before any module sees it.
-  Without this, most of a track's audible energy is crammed into a handful
-  of the lowest raw bins, which reads as bass looking static/underused and
-  the sparser high end looking disproportionately "active" — see
-  TECHNICAL.md for the full writeup.
-- Runs on both X11 and Wayland sessions (GLFW picks whichever the session
-  is actually running).
+  default `log2`) — redistributes the FFT spectrum onto a scale that
+  matches how humans actually resolve pitch, so bass doesn't read as
+  static and treble as disproportionately "active." See the
+  [docs site](https://neo-vortex.github.io/GlavaSharp/architecture/fft/)
+  for the full writeup.
+- Runs on both X11 and Wayland (GLFW picks whichever the session is
+  actually running).
 - **Desktop-embedded mode** (`--desktop`, GLava's `-d` equivalent) —
   renders pinned behind desktop icons via X11 EWMH hints, transparent and
-  click-through. Covers the whole (multi-monitor) screen by default;
-  `--desktop-geometry X,Y,W,H` or `--desktop-monitor <index>`
-  (`--list-monitors` to see indices) constrain it to an exact rect or a
-  single monitor. Verified working on XFCE/xfwm4; GNOME and native
-  Wayland aren't implemented yet.
+  click-through. `--desktop-geometry X,Y,W,H` or `--desktop-monitor
+  <index>` constrain it to a rect or a single monitor. Verified on
+  XFCE/xfwm4; GNOME and native Wayland aren't implemented yet.
 - GPU picker for hybrid-graphics laptops (`--list-gpus` / `--gpu <n>`).
+- **Live control channel** — a local web page
+  (`http://127.0.0.1:8642/` by default) with an auto-generated slider for
+  every tweakable property, updating instantly with no restart. Properties
+  can also be fed from a live data source instead of a slider (e.g.
+  `clock`'s hands). `--no-control` disables it; `--control-bind 0.0.0.0`
+  opts into LAN access at your own risk (no authentication).
+- **Shader hot-reload** — edit any `.frag`/`.glsl` file the running module
+  uses and it recompiles in place on save, on by default
+  (`--no-hot-reload` to turn it off).
 - Builds as a self-contained Native AOT executable — no installed .NET
-  runtime needed. Its own build output (`build/dist/`) isn't a single file
-  though: `libglfw.so.3.3`/`libglfw-wayland.so.3.3` (dynamically linked,
-  unlike the Rust audio/X11 shims, which *are* statically linked) and
-  `shaders/` ship alongside it. `cmake --build build --target appimage`
-  packs all of that into one actual single-file `.AppImage` — see
+  runtime needed. `cmake --build build --target appimage` packs the whole
+  build output into one single-file `.AppImage` — see
   [Building](#building) below.
 
 ## Building
@@ -133,9 +135,10 @@ cmake --build build --target appimage
 
 For a faster CPU FFT on machines you know have AVX2+FMA (most x86_64 CPUs
 since ~2013), reconfigure with `-DGLAVASHARP_AVX2_CPU_FFT=ON` before
-building — 1.2x-1.6x faster (see
-[TECHNICAL.md's Benchmarks](TECHNICAL.md#benchmarks)), at the cost of the
-resulting binary refusing to run at all on CPUs without AVX2+FMA. The
+building — 1.2x-1.6x faster (see the
+[Benchmarks page](https://neo-vortex.github.io/GlavaSharp/benchmarks/)),
+at the cost of the resulting binary refusing to run at all on CPUs
+without AVX2+FMA. The
 `appimage` target names its output `GlavaSharp-x86_64-avx2.AppImage`
 instead of the plain name when this is on, so the two can't be mixed up:
 
@@ -144,9 +147,9 @@ cmake -S . -B build -DGLAVASHARP_AVX2_CPU_FFT=ON
 cmake --build build && cmake --build build --target appimage
 ```
 
-See [TECHNICAL.md](TECHNICAL.md#building-detailed) for building each
-piece independently, cleaning, and why a plain `dotnet build` alone can't
-run the app end-to-end.
+See the [docs site](https://neo-vortex.github.io/GlavaSharp/getting-started/building/)
+for building each piece independently, cleaning, and why a plain
+`dotnet build` alone can't run the app end-to-end.
 
 ## Running
 
@@ -162,11 +165,17 @@ run the app end-to-end.
 ./build/dist/GlavaSharp --desktop --desktop-monitor 1                  # ...on just monitor 1
 ./build/dist/GlavaSharp --desktop --desktop-geometry 100,100,800,600   # ...at a specific rect
 ./build/dist/GlavaSharp --desktop --module aurora                      # calming ambient desktop visualizer
+./build/dist/GlavaSharp --module clock                                 # analog clock + radial spectrum
 ```
 
+Then open `http://127.0.0.1:8642/` in a browser for live sliders (FFT
+attack/decay/gain, plus module properties like `aurora`'s `amplify`) --
+edit a `.frag`/`.glsl` file and it hot-reloads on save, no restart needed
+for either.
+
 See the top of `src/GlavaSharp/Program.cs` for the full CLI flag
-reference, or [TECHNICAL.md](TECHNICAL.md) for how each piece actually
-works under the hood.
+reference, or the **[docs site](https://neo-vortex.github.io/GlavaSharp/)**
+for how each piece actually works under the hood.
 
 ## License
 

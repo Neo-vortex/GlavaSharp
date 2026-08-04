@@ -1,0 +1,95 @@
+/* Stage 2 of the GPU-resident FFT pipeline: bucketing + gravity smoothing +
+   direct write into the render-facing spectrum textures. Runs after
+   radix2.comp (stage 1: window/bit-reversal on the CPU, FFT + magnitude on
+   the GPU) and reads its OutL/OutR SSBOs as input -- see Shaders/GpuFft.cs's
+   ProcessToTexture for the two-dispatch sequence and the barrier between
+   them.
+
+   This is what makes the GPU path actually GPU-resident end to end: before
+   this existed, GpuFft.Process() read OutL/OutR back to the CPU with a
+   synchronous glGetBufferSubData (a full pipeline stall), did bucketing +
+   gravity there, and AppWindow re-uploaded the result into the spectrum
+   textures with glTexSubImage1D -- two CPU<->GPU round trips for work that
+   never needed to leave the GPU. This kernel does the same math (bucketing
+   matches FrequencyBucketing.Apply's max/lerp exactly; gravity matches
+   CpuFft.ApplyGravity's attack/decay exactly) but writes straight into the
+   R32F textures via imageStore, so the frame's spectrum data touches the
+   CPU exactly once (the small windowed-PCM upload before stage 1) instead
+   of three times.
+
+   Bins == N/2 always (see FrequencyBucketing's callers in CpuFft/GpuFft --
+   bucketing redistributes the same bin count across a perceptual frequency
+   axis, it doesn't reduce it), so this dispatches with the same
+   local_size_x as radix2.comp and the same single-workgroup reasoning
+   applies. __BINS__/__BUCKETED__/__RAWBINS__ substituted the same way
+   GpuFft.LoadKernelSource already does for __N__/__HALF__ in radix2.comp --
+   GLSL needs local_size_x and the #if branch resolved at compile time. */
+
+#version 430
+layout(local_size_x = __BINS__) in;
+
+layout(std430, binding = 2) buffer OutL { float rawL[]; };
+layout(std430, binding = 3) buffer OutR { float rawR[]; };
+
+#if __BUCKETED__
+layout(std430, binding = 4) buffer BucketLoHi { ivec2 bucketLoHi[]; };
+layout(std430, binding = 5) buffer BucketCenter { float bucketCenter[]; };
+#endif
+
+layout(std430, binding = 6) buffer GravityL { float gravL[]; };
+layout(std430, binding = 7) buffer GravityR { float gravR[]; };
+
+layout(r32f, binding = 0) uniform writeonly image1D texL;
+layout(r32f, binding = 1) uniform writeonly image1D texR;
+
+uniform float u_attack;
+uniform float u_decay;
+
+void main() {
+    uint b = gl_GlobalInvocationID.x; // 0 .. Bins-1
+
+    float bL, bR;
+
+#if __BUCKETED__
+    ivec2 lohi = bucketLoHi[b];
+    if (lohi.y > lohi.x) {
+        // Max, not average -- matches FrequencyBucketing.Apply: a single
+        // loud harmonic in a bucket spanning many quiet raw bins should
+        // still read as loud.
+        float vL = 0.0, vR = 0.0;
+        for (int i = lohi.x; i <= lohi.y; i++) {
+            vL = max(vL, rawL[i]);
+            vR = max(vR, rawR[i]);
+        }
+        bL = vL;
+        bR = vR;
+    } else {
+        // Bucket narrower than one raw bin -- lerp around the center bin,
+        // same fallback as FrequencyBucketing.Apply.
+        float c = bucketCenter[b];
+        int lo = clamp(int(floor(c)), 0, __RAWBINS__ - 1);
+        int hi = clamp(lo + 1, 0, __RAWBINS__ - 1);
+        float frac = c - float(lo);
+        bL = mix(rawL[lo], rawL[hi], frac);
+        bR = mix(rawR[lo], rawR[hi], frac);
+    }
+#else
+    bL = rawL[b];
+    bR = rawR[b];
+#endif
+
+    // Gravity smoothing -- identical formula to CpuFft.ApplyGravity, but
+    // the state (gravL/gravR) lives in a persistent SSBO instead of a CPU
+    // array: parallel across bins even though serial across frames, so it
+    // stays on the GPU fine as long as nothing ping-pongs the buffer.
+    float prevL = gravL[b];
+    float prevR = gravR[b];
+    float smoothL = prevL + (bL - prevL) * (bL > prevL ? u_attack : u_decay);
+    float smoothR = prevR + (bR - prevR) * (bR > prevR ? u_attack : u_decay);
+
+    gravL[b] = smoothL;
+    gravR[b] = smoothR;
+
+    imageStore(texL, int(b), vec4(smoothL, 0.0, 0.0, 0.0));
+    imageStore(texR, int(b), vec4(smoothR, 0.0, 0.0, 0.0));
+}

@@ -1,0 +1,76 @@
+site_name: GlavaSharp
+site_description: >-
+  GLava's shader ecosystem, rebuilt from scratch on a memory-safe C#/.NET
+  host — architecture, design trade-offs, and the full status/roadmap.
+site_url: https://neo-vortex.github.io/GlavaSharp/
+repo_url: https://github.com/Neo-vortex/GlavaSharp
+repo_name: Neo-vortex/GlavaSharp
+edit_uri: edit/main/docs-site/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: deep purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: deep purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Building: getting-started/building.md
+      - Running: getting-started/running.md
+      - Packaging: getting-started/packaging.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Audio Capture: architecture/audio-capture.md
+      - FFT & Frequency Bucketing: architecture/fft.md
+      - GPU Selection: architecture/gpu-selection.md
+      - Shader Preprocessing: architecture/shader-preprocessing.md
+      - Shader Module Pipeline: architecture/shader-module-pipeline.md
+      - GlavaSharp-Original Modules: architecture/original-modules.md
+      - Windowing: architecture/windowing.md
+      - Desktop-Embedded Mode: architecture/desktop-embedded-mode.md
+      - Live Control Channel & Hot-Reload: architecture/control-channel.md
+      - Configuration: architecture/configuration.md
+  - Design Trade-offs: design-tradeoffs.md
+  - Comparison to GLava: comparison.md
+  - Status & Roadmap: status-roadmap.md
+  - Benchmarks: benchmarks.md
+  - License: license.md

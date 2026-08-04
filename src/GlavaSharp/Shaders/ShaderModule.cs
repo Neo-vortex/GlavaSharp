@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -22,6 +23,25 @@ namespace GlavaSharp.Shaders;
 ///     buffers — see <see cref="EnsureHistoryBuffers" />. This is what
 ///     shaders/glavasharp/waterfall/1.frag uses to accumulate a scrolling
 ///     spectrogram.
+///
+///     Also owns two more GlavaSharp-original extensions:
+///      - Hot-reload: a <see cref="FileSystemWatcher" /> tracks every file
+///        each pass actually pulled in via <c>#include</c> (not just the
+///        module directory -- shared files like <c>util/smooth.glsl</c> or a
+///        sibling <c>glavasharp/</c> module directory count too). Saving any
+///        of them marks the affected pass(es) dirty; <see cref="ReloadIfDirty" />,
+///        called once per frame from the render thread, recompiles just
+///        those passes in place and swaps the GL program in on success,
+///        leaving the previous program running (with a logged error) on a
+///        compile failure.
+///      - Live properties: a pass can declare
+///        <c>#request property "name" float default min max</c> (see
+///        <see cref="GlavaPreprocessor.PropertyDeclaration" />) to expose a
+///        uniform to the live control channel (<see cref="Control.PropertyStore" />).
+///        <see cref="SetProperty" /> is called from the render thread (via
+///        <see cref="Control.PropertyStore.DrainPending" />) and the current
+///        value is re-applied to every pass that declared it each
+///        <see cref="Render" /> call.
 /// </summary>
 public sealed class ShaderModule : IDisposable
 {
@@ -44,6 +64,29 @@ public sealed class ShaderModule : IDisposable
     private int _histFboA, _histTexA, _histFboB, _histTexB;
     private bool _historyReadIsA = true;
 
+    // Needed to recompile a pass identically to how the constructor first
+    // compiled it -- see RecompilePass.
+    private readonly bool _useAlpha;
+    private readonly bool _freqPrebucketed;
+    private readonly bool _hotReloadEnabled;
+
+    // Live property values, keyed by declared name (see #request property).
+    // Seeded from each declaration's default when first seen; updated by
+    // SetProperty (render-thread only, called via PropertyStore.DrainPending)
+    // and re-applied to every pass that declared that name each Render() call.
+    private readonly Dictionary<string, float> _propertyValues = new();
+
+    // Hot-reload: directory-level watchers (not per-file -- FileSystemWatcher
+    // doesn't support that well, and a single recursive watcher over the
+    // relevant tree covers every #include a pass could have pulled in, new
+    // ones included) feeding a dedup set of changed absolute file paths that
+    // ReloadIfDirty drains once per frame on the render thread (GL calls
+    // aren't safe from the watcher's own callback thread).
+    private readonly List<FileSystemWatcher> _watchers = new();
+    private readonly ConcurrentDictionary<string, byte> _dirtyFiles = new();
+    private readonly ConcurrentDictionary<string, long> _lastReloadAttempt = new();
+    private const long ReloadDebounceTicks = 150 * TimeSpan.TicksPerMillisecond;
+
     /// <param name="rootDir">Shader root (e.g. .../glava).</param>
     /// <param name="moduleName">Module directory name under <paramref name="rootDir" /> (e.g. "radial").</param>
     /// <param name="useAlpha">
@@ -64,8 +107,12 @@ public sealed class ShaderModule : IDisposable
     ///     which `util/smooth.glsl`'s `scale_audio` checks to skip its own
     ///     log-ish warp -- applying both would warp the spectrum twice.
     /// </param>
-    public ShaderModule(string rootDir, string moduleName, bool useAlpha, bool freqPrebucketed)
+    public ShaderModule(string rootDir, string moduleName, bool useAlpha, bool freqPrebucketed,
+        bool enableHotReload = true)
     {
+        _useAlpha = useAlpha;
+        _freqPrebucketed = freqPrebucketed;
+        _hotReloadEnabled = enableHotReload;
         RootDir = rootDir;
         ModuleName = moduleName;
         ModuleDir = Path.Combine(rootDir, moduleName);
@@ -95,8 +142,10 @@ public sealed class ShaderModule : IDisposable
             var fragPath = Path.Combine(ModuleDir, $"{i}.frag");
             if (!File.Exists(fragPath)) break;
 
-            var (src, uniformBindings) = GlavaPreprocessor.Process(fragPath, ModuleDir, RootDir);
-            var pass = new Pass { SourcePath = fragPath };
+            var (src, uniformBindings, properties, feeds, includedFiles) =
+                GlavaPreprocessor.Process(fragPath, ModuleDir, RootDir);
+            var pass = new Pass
+                { SourcePath = fragPath, Dependencies = includedFiles, Properties = properties, Feeds = feeds };
             Log.Debug($"compiling pass {fragPath} ...");
             if (TryCompilePass(src, fragPath, useAlpha, freqPrebucketed, out var program, out var disabledStage))
             {
@@ -114,6 +163,9 @@ public sealed class ShaderModule : IDisposable
                 // GlavaSharp-original extension, not a GLava convention --
                 // see the class doc comment and EnsureHistoryBuffers.
                 pass.HistoryUniformName = uniformBindings.GetValueOrDefault("history");
+                foreach (var p in properties)
+                    if (!_propertyValues.ContainsKey(p.Name))
+                        _propertyValues[p.Name] = p.Default;
             }
             else if (disabledStage)
             {
@@ -135,6 +187,190 @@ public sealed class ShaderModule : IDisposable
         if (_passes.Count == 0)
             throw new InvalidOperationException(
                 $"No numbered .frag passes found in {ModuleDir} (expected 1.frag, 2.frag, ...)");
+
+        if (_hotReloadEnabled) SetupWatchers();
+    }
+
+    /// <summary>
+    ///     Descriptors for every <c>#request property</c> declared by any
+    ///     pass in this module -- what <see cref="Windowing.AppWindow" />
+    ///     registers into <see cref="Control.PropertyStore" /> (namespaced
+    ///     <c>module.&lt;name&gt;</c>) so the control channel can list/tweak them.
+    /// </summary>
+    public IEnumerable<PropertyDeclaration> PropertyDeclarations =>
+        _passes.SelectMany(p => p.Properties).GroupBy(p => p.Name).Select(g => g.First());
+
+    /// <summary>
+    ///     Every <c>#request feed</c> binding declared by any pass in this
+    ///     module -- what <see cref="Windowing.AppWindow" /> uses to pass a
+    ///     feed source name alongside a property's min/max/default when
+    ///     registering it into <see cref="Control.PropertyStore" />.
+    /// </summary>
+    public IEnumerable<FeedBinding> FeedBindings =>
+        _passes.SelectMany(p => p.Feeds).GroupBy(f => f.PropertyName).Select(g => g.First());
+
+    /// <summary>
+    ///     Render-thread only (called via <see cref="Control.PropertyStore.DrainPending" />'s
+    ///     callback in <see cref="Windowing.AppWindow.Run" />). Takes effect
+    ///     on the next <see cref="Render" /> call -- there's no GL work here,
+    ///     just updating the value <see cref="Render" /> uploads per-pass.
+    /// </summary>
+    public void SetProperty(string name, float value) => _propertyValues[name] = value;
+
+    /// <summary>
+    ///     Watches the shader tree for edits and recompiles affected passes
+    ///     in place. Two roots, not one: <see cref="RootDir" /> covers GLava's
+    ///     own module tree (util/*.glsl includes, and ModuleDir itself when
+    ///     it's a normal child of RootDir), but a GlavaSharp-original module
+    ///     resolved via the sibling-directory fallback (see the constructor's
+    ///     <c>Directory.Exists(ModuleDir)</c> check above) lives outside
+    ///     RootDir entirely -- e.g. shaders/glavasharp/aurora next to
+    ///     shaders/glava -- so that case gets its own watcher.
+    /// </summary>
+    private void SetupWatchers()
+    {
+        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Path.GetFullPath(RootDir) };
+        var fullModuleDir = Path.GetFullPath(ModuleDir);
+        if (!fullModuleDir.StartsWith(Path.GetFullPath(RootDir) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase))
+            roots.Add(Path.GetDirectoryName(fullModuleDir) ?? fullModuleDir);
+
+        foreach (var root in roots.Where(Directory.Exists))
+        {
+            FileSystemWatcher watcher;
+            try
+            {
+                watcher = new FileSystemWatcher(root)
+                {
+                    IncludeSubdirectories = true,
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName
+                };
+                watcher.Filters.Add("*.frag");
+                watcher.Filters.Add("*.glsl");
+                watcher.Changed += OnFileChanged;
+                watcher.Created += OnFileChanged;
+                watcher.Renamed += OnFileChanged;
+                watcher.EnableRaisingEvents = true;
+            }
+            catch (Exception ex)
+            {
+                // Hot-reload is a dev convenience, not core functionality --
+                // a watcher failing to start (e.g. inotify watch limit
+                // exhausted) shouldn't take the whole module down with it.
+                Log.Warn($"Shader hot-reload disabled for {root}: {ex.Message}");
+                continue;
+            }
+
+            _watchers.Add(watcher);
+        }
+    }
+
+    private void OnFileChanged(object sender, FileSystemEventArgs e)
+    {
+        if (string.IsNullOrEmpty(e.FullPath)) return;
+        _dirtyFiles[Path.GetFullPath(e.FullPath)] = 0;
+    }
+
+    /// <summary>
+    ///     Render-thread only, call once per frame. Recompiles every pass
+    ///     whose tracked <c>#include</c> dependency set contains a file that
+    ///     changed since the last call -- e.g. editing a shared
+    ///     <c>util/smooth.glsl</c> recompiles every pass that included it,
+    ///     not just one. A pass whose recompile fails keeps running its
+    ///     previous (still-valid) GL program; the error is logged, nothing
+    ///     crashes.
+    /// </summary>
+    public void ReloadIfDirty()
+    {
+        if (_dirtyFiles.IsEmpty) return;
+
+        var changed = _dirtyFiles.Keys
+            .ToArray()
+            .Where(path => _dirtyFiles
+                .TryRemove(path, out _))
+            .ToList();
+
+        var now = DateTime.UtcNow.Ticks;
+        var dirtyPasses = new HashSet<int>();
+        for (var i = 0; i < _passes.Count; i++)
+        {
+            var pass = _passes[i];
+            if (pass.Dependencies is null) continue;
+            foreach (var path in changed)
+            {
+                if (!pass.Dependencies.Contains(path)) continue;
+                // Debounced per source *pass file* (not per changed
+                // dependency) -- editors that write a file via multiple
+                // syscalls (truncate+write, or write-temp+rename) can fire
+                // several FileSystemWatcher events for a single logical
+                // save; without this a fast burst of them would attempt the
+                // same recompile several times a frame apart instead of once.
+                var lastAttempt = _lastReloadAttempt.GetValueOrDefault(pass.SourcePath);
+                if (now - lastAttempt < ReloadDebounceTicks) continue;
+                dirtyPasses.Add(i);
+            }
+        }
+
+        foreach (var i in dirtyPasses)
+        {
+            _lastReloadAttempt[_passes[i].SourcePath] = now;
+            RecompilePass(i);
+        }
+    }
+
+    /// <summary>Recompiles pass <paramref name="index" /> from disk, swapping in the new GL program only on success.</summary>
+    private void RecompilePass(int index)
+    {
+        var pass = _passes[index];
+        Log.Info($"Hot-reload: recompiling {pass.SourcePath} ...");
+        try
+        {
+            var (src, uniformBindings, properties, feeds, includedFiles) =
+                GlavaPreprocessor.Process(pass.SourcePath, ModuleDir, RootDir);
+
+            if (!TryCompilePass(src, pass.SourcePath, _useAlpha, _freqPrebucketed, out var program,
+                    out var disabledStage))
+            {
+                // A pass that hot-reloads into __disablestage is treated the
+                // same as at load time (it's a valid, intentional state, not
+                // a failure) -- but flipping Enabled on an already-running
+                // pass this way is an edge case real modules don't hit in
+                // practice (USE_ALPHA/freq-prebucketed don't change at
+                // runtime), so it's handled but not specially celebrated.
+                if (disabledStage)
+                {
+                    if (pass.Program != 0) GL.DeleteProgram(pass.Program);
+                    pass.Enabled = false;
+                    pass.Program = 0;
+                    Log.Info($"Hot-reload: {pass.SourcePath} is now a disabled stage (__disablestage).");
+                    return;
+                }
+
+                Log.Error($"Hot-reload: recompile failed for {pass.SourcePath}, keeping the previous version running.");
+                return;
+            }
+
+            var oldProgram = pass.Program;
+            pass.Program = program;
+            pass.Enabled = true;
+            pass.PrevUniformName = uniformBindings.GetValueOrDefault("prev", "tex0");
+            pass.HistoryUniformName = uniformBindings.GetValueOrDefault("history");
+            pass.Dependencies = includedFiles;
+            pass.Properties = properties;
+            pass.Feeds = feeds;
+            foreach (var p in properties)
+                if (!_propertyValues.ContainsKey(p.Name))
+                    _propertyValues[p.Name] = p.Default;
+
+            if (oldProgram != 0) GL.DeleteProgram(oldProgram);
+            Log.Info($"Hot-reload: {pass.SourcePath} recompiled OK.");
+        }
+        catch (Exception ex)
+        {
+            // File I/O races (editor briefly has the file half-written) land
+            // here rather than in TryCompilePass -- same non-fatal handling.
+            Log.Error($"Hot-reload: recompile failed for {pass.SourcePath}: {ex.Message}");
+        }
     }
 
     public string ModuleDir { get; }
@@ -143,6 +379,7 @@ public sealed class ShaderModule : IDisposable
 
     public void Dispose()
     {
+        foreach (var watcher in _watchers) watcher.Dispose();
         foreach (var p in _passes.Where(p => p.Enabled)) GL.DeleteProgram(p.Program);
         if (_fboA != 0) GL.DeleteFramebuffer(_fboA);
         if (_fboB != 0) GL.DeleteFramebuffer(_fboB);
@@ -277,6 +514,8 @@ public sealed class ShaderModule : IDisposable
             GL.UseProgram(pass.Program);
             SetUniform2i(pass.Program, "screen", passWidth, passHeight);
             SetUniform1i(pass.Program, "audio_sz", audioSz);
+            foreach (var prop in pass.Properties)
+                SetUniform1f(pass.Program, prop.Name, _propertyValues.GetValueOrDefault(prop.Name, prop.Default));
 
             var unit = 0;
             if (prevTex >= 0) BindSampler(pass.Program, pass.PrevUniformName, prevTex, unit++);
@@ -315,6 +554,12 @@ public sealed class ShaderModule : IDisposable
     }
 
     private static void SetUniform1i(int program, string name, int v)
+    {
+        var loc = GL.GetUniformLocation(program, name);
+        if (loc >= 0) GL.Uniform1(loc, v);
+    }
+
+    private static void SetUniform1f(int program, string name, float v)
     {
         var loc = GL.GetUniformLocation(program, name);
         if (loc >= 0) GL.Uniform1(loc, v);
@@ -443,5 +688,14 @@ public sealed class ShaderModule : IDisposable
         ///     that as its own <see cref="PrevUniformName" /> to display it.
         /// </summary>
         public string? HistoryUniformName;
+
+        /// <summary>Absolute paths of every file this pass pulled in via #include (entry file included) -- see GlavaPreprocessor.Process. Null only for a disabled (__disablestage) pass, which never got this far.</summary>
+        public IReadOnlySet<string>? Dependencies;
+
+        /// <summary>This pass's own #request property declarations (see GlavaPreprocessor.PropertyDeclaration) -- empty for the common case of a pass with no live-tweakable uniforms.</summary>
+        public IReadOnlyList<PropertyDeclaration> Properties = Array.Empty<PropertyDeclaration>();
+
+        /// <summary>This pass's own #request feed bindings (see GlavaPreprocessor.FeedBinding) -- empty for the common case of a pass with no feed-eligible properties.</summary>
+        public IReadOnlyList<FeedBinding> Feeds = Array.Empty<FeedBinding>();
     }
 }

@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
+using System.Linq;
 using GlavaSharp.Audio;
+using GlavaSharp.Control;
 using GlavaSharp.Shaders;
 using OpenTK.Graphics.OpenGL;
 using OpenTK.Windowing.GraphicsLibraryFramework;
@@ -22,6 +24,8 @@ public sealed unsafe class AppWindow : IDisposable
     private readonly ShaderModule _module;
     private readonly AudioSpectrumTexture _texL;
     private readonly AudioSpectrumTexture _texR;
+    private readonly PropertyStore _propertyStore = new();
+    private ControlServer? _controlServer;
     private Window* _handle;
     private IntPtr _desktopModeHandle;
 
@@ -100,12 +104,78 @@ public sealed unsafe class AppWindow : IDisposable
         // fftSettings is null) so util/smooth.glsl's warp gets disabled
         // exactly when CpuFft/GpuFft are actually bucketing upstream.
         var freqPrebucketed = (fftSettings?.Scale ?? FrequencyScale.Log2) != FrequencyScale.Linear;
-        _module = new ShaderModule(shaderRootDir, moduleName, options.DesktopMode, freqPrebucketed);
+        _module = new ShaderModule(shaderRootDir, moduleName, options.DesktopMode, freqPrebucketed,
+            options.HotReloadEnabled);
         Log.Info($"Loaded module '{moduleName}' from {_module.ModuleDir}");
+
+        SetUpLiveControl(options, fftSettings);
+    }
+
+    /// <summary>
+    ///     Registers the FFT globals and every module-declared
+    ///     <c>#request property</c> into <see cref="_propertyStore" />, then
+    ///     starts <see cref="ControlServer" /> unless
+    ///     <see cref="WindowOptions.ControlEnabled" /> is false. A bind
+    ///     failure (e.g. another GlavaSharp instance already holds the port)
+    ///     is logged and swallowed -- the control channel is a nice-to-have,
+    ///     not something worth crashing the visualizer over. Independent of
+    ///     <see cref="WindowOptions.DesktopMode" />: this runs identically
+    ///     whether the window ends up pinned/embedded or normal.
+    /// </summary>
+    private void SetUpLiveControl(WindowOptions options, FftSettings? fftSettings)
+    {
+        var settings = fftSettings ?? new FftSettings();
+        _propertyStore.Register("fft.attack", "fft", 0f, 1f, settings.Attack);
+        _propertyStore.Register("fft.decay", "fft", 0f, 1f, settings.Decay);
+        _propertyStore.Register("fft.gain", "fft", 1f, 200f, settings.Gain);
+
+        var feedSources = _module.FeedBindings.ToDictionary(f => f.PropertyName, f => f.Source);
+        foreach (var p in _module.PropertyDeclarations)
+            _propertyStore.Register(p.Name, _module.ModuleName, p.Min, p.Max, p.Default,
+                feedSources.GetValueOrDefault(p.Name));
+
+        if (!options.ControlEnabled) return;
+        try
+        {
+            _controlServer = new ControlServer(_propertyStore, options.ControlBindHost, options.ControlPort);
+            Log.Info($"Live control channel: {_controlServer.BoundPrefix}");
+        }
+        catch (InvalidOperationException ex)
+        {
+            Log.Warn($"Live control channel disabled: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    ///     Applies one queued property change (render-thread only, called
+    ///     from <see cref="Run" /> via <see cref="PropertyStore.DrainPending" />) --
+    ///     routes the three well-known FFT globals to <see cref="_fft" />'s
+    ///     setters and everything else (module-declared properties, named
+    ///     exactly as the shader's own <c>#request property</c> declared
+    ///     them) straight to <see cref="ShaderModule.SetProperty" />.
+    /// </summary>
+    private void ApplyPropertyChange(string name, float value)
+    {
+        switch (name)
+        {
+            case "fft.attack":
+                _fft.SetAttack(value);
+                break;
+            case "fft.decay":
+                _fft.SetDecay(value);
+                break;
+            case "fft.gain":
+                _fft.SetGain(value);
+                break;
+            default:
+                _module.SetProperty(name, value);
+                break;
+        }
     }
 
     public void Dispose()
     {
+        _controlServer?.Dispose();
         _module.Dispose();
         _texL.Dispose();
         _texR.Dispose();
@@ -229,12 +299,23 @@ public sealed unsafe class AppWindow : IDisposable
         {
             GLFWBind.PollEvents();
 
+            // Render-thread-only work queued from other threads: live
+            // control channel property changes (HTTP handler thread) and
+            // shader hot-reload recompiles (FileSystemWatcher callback
+            // thread) both funnel through here since this is the only
+            // thread with the GL context current.
+            _propertyStore.DrainPending(ApplyPropertyChange);
+            // Applied after DrainPending so an enabled feed always wins over
+            // a stale manual value from before it was turned on -- see
+            // PropertyStore.ApplyFeeds's doc comment.
+            _propertyStore.ApplyFeeds(ApplyPropertyChange);
+            _module.ReloadIfDirty();
+
             _audioWindow.Pump(_audio);
-            var (magL, magR) = _fft.Process(_audioWindow.Snapshot);
-
-
-            _texL.Upload(magL);
-            _texR.Upload(magR);
+            // ProcessToTexture: CpuFft computes on the CPU and uploads the
+            // result same as before; GpuFft writes straight into _texL/_texR
+            // from its compute shader, no CPU round trip (see IFft.ProcessToTexture).
+            _fft.ProcessToTexture(_audioWindow.Snapshot, _texL, _texR);
 
             GLFWBind.GetFramebufferSize(_handle, out var fbWidth, out var fbHeight);
             if (fbWidth > 0 && fbHeight > 0) _module.Render(fbWidth, fbHeight, _texL.Handle, _texR.Handle, _fft.Bins);

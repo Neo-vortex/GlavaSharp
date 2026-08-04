@@ -35,3 +35,16 @@ directory when a module isn't found under the primary `--shaders` root.
   buffer's own previous frame through a fixed sideways sway each frame; see
   `aurora/1.frag`'s comments for how that produces organic-looking drift
   from pure feedback.
+- **`clock/`** — an analog clock face with real hour/minute/second hands,
+  drawn on top of an ordinary audio-reactive radial spectrum (`1.frag` is
+  just `radial/1.frag`, `#include`d verbatim — a glowing center circle plus
+  a ring of FFT bars, nothing clock-specific about it). The hands
+  (`2.frag`) are driven by one `#request property "seconds_since_midnight"`
+  uniform, which also carries a `#request feed "seconds_since_midnight"
+  clock` binding — see `Shaders/GlavaPreprocessor.cs`'s `FeedBinding` and
+  `Control/FeedRegistry.cs`. With that feed enabled (the default), the live
+  control channel samples the system clock every frame and pokes the
+  result in exactly like a slider drag would; the shader and
+  `ShaderModule` have no special-cased notion of "time" at all, it's just
+  another fed property. Toggle the feed off in the control page to freeze
+  the hands at whatever the slider holds instead.

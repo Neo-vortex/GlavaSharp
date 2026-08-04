@@ -28,6 +28,13 @@
 #request uniform "screen" screen
 uniform ivec2 screen;
 
+// GlavaSharp-original extension, not a GLava convention -- exposes this
+// uniform to the live control channel (see ShaderModule/Control.PropertyStore),
+// starting at the same 2.6 the old AMPLIFY #define used. Range picked wide
+// enough to go from barely-there to blown-out without needing a restart.
+#request property "amplify" float 2.6 0.5 6.0
+uniform float amplify;
+
 #request uniform "audio_sz" audio_sz
 uniform int audio_sz;
 
@@ -180,7 +187,7 @@ void main() {
             float r = smooth_audio(audio_r, audio_sz, pos);
             energy += max(l, r) / float(NBANDS);
         }
-        energy *= AMPLIFY * fade;
+        energy *= amplify * fade;
 
         /* Treble-driven shimmer: fine, high-frequency noise riding on top
            of the injected energy (not a separate additive layer -- it

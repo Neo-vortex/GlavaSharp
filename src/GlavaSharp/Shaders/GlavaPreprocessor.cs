@@ -7,6 +7,55 @@ using System.Text.RegularExpressions;
 namespace GlavaSharp.Shaders;
 
 /// <summary>
+///     A live-tweakable property a pass opts into via
+///     <c>#request property "name" type default min max</c> — a
+///     GlavaSharp-original extension, not a GLava directive. Declares a
+///     uniform that starts at <paramref name="Default" /> like any other,
+///     but can also be poked at runtime through the live control channel
+///     (see <see cref="Control.PropertyStore" />/<see cref="ShaderModule" />).
+///     Only <c>float</c> is implemented for now — <paramref name="Type" />
+///     is captured for forward compat but everything currently flows through
+///     as a GLSL <c>float</c>/<c>uniform float</c>.
+/// </summary>
+public sealed record PropertyDeclaration(string Name, string Type, float Default, float Min, float Max);
+
+/// <summary>
+///     Marks a previously-declared <see cref="PropertyDeclaration" /> as
+///     eligible to be driven by a named built-in data source instead of
+///     manual slider input, via <c>#request feed "name" source</c> — e.g.
+///     <c>#request feed "seconds_since_midnight" clock</c> (see
+///     <see cref="Control.FeedRegistry" /> for what source names exist).
+///     Deliberately a separate line from <c>#request property</c> rather
+///     than folded into it: the property declaration alone is already
+///     complete and valid GLSL-adjacent metadata (a manually-tunable
+///     uniform with a range) -- feed-eligibility is an orthogonal,
+///     optional annotation on top, not a different kind of property. A
+///     pass can in principle mark any property this way, not just
+///     time-related ones.
+/// </summary>
+public sealed record FeedBinding(string PropertyName, string Source);
+
+/// <summary>
+///     Everything <see cref="GlavaPreprocessor.Process" /> collects while
+///     preprocessing one pass: the resulting GLSL <paramref name="Source" />;
+///     the role -> GLSL-identifier map from any `#request uniform "&lt;role&gt;"
+///     &lt;name&gt;` lines (e.g. "prev" -> "tex") -- roles a pass doesn't declare
+///     simply aren't in the dictionary, callers should fall back to GLava's
+///     conventional default names; the <see cref="PropertyDeclaration" />s
+///     and <see cref="FeedBinding" />s collected from any `#request
+///     property`/`#request feed` lines; and the full set of absolute file
+///     paths this pass pulled in via `#include` (entry file included) --
+///     used by <see cref="ShaderModule" /> to know which files on disk
+///     should trigger a recompile of this pass for hot-reload.
+/// </summary>
+public sealed record PreprocessResult(
+    string Source,
+    IReadOnlyDictionary<string, string> UniformBindings,
+    IReadOnlyList<PropertyDeclaration> Properties,
+    IReadOnlyList<FeedBinding> Feeds,
+    IReadOnlySet<string> IncludedFiles);
+
+/// <summary>
 ///     A deliberately small subset of GLava's own shader preprocessor —
 ///     enough to load real GLava module files (rc.glsl, bars.glsl, bars/*.frag,
 ///     util/*.glsl) as plain GLSL. What it does NOT do: evaluate the
@@ -20,6 +69,18 @@ namespace GlavaSharp.Shaders;
 public static class GlavaPreprocessor
 {
     private static readonly Regex RequestLine = new(@"^\s*#request\b.*$", RegexOptions.Multiline);
+
+    // GlavaSharp-original extension (see PropertyDeclaration) -- captured
+    // before the generic RequestLine strip below removes it, same pattern
+    // RequestUniform already uses.
+    private static readonly Regex RequestProperty =
+        new(@"^\s*#request\s+property\s+""(\w+)""\s+(\w+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*$",
+            RegexOptions.Multiline);
+
+    // GlavaSharp-original extension (see FeedBinding) -- same capture-then-strip
+    // pattern as RequestProperty above.
+    private static readonly Regex RequestFeed =
+        new(@"^\s*#request\s+feed\s+""(\w+)""\s+(\w+)\s*$", RegexOptions.Multiline);
 
     // A handful of `#request set<name> <value>` directives don't just
     // configure the C host (window geometry, title, etc. — safely dropped
@@ -60,24 +121,19 @@ public static class GlavaPreprocessor
     /// <param name="entryFile">Absolute path to the .frag/.glsl file to preprocess.</param>
     /// <param name="moduleDir">Directory of the active module (e.g. .../glava/bars) — resolves "@x" includes.</param>
     /// <param name="rootDir">Shader root (e.g. .../glava) — resolves ":x" includes.</param>
-    /// <returns>
-    ///     The preprocessed GLSL source, plus the role -> GLSL-identifier map
-    ///     collected from any `#request uniform "<role>" <name>` lines in the
-    ///     entry file or its includes (e.g. "prev" -> "tex"). Roles a pass
-    ///     doesn't declare simply aren't in the dictionary — callers should
-    ///     fall back to GLava's conventional default names.
-    /// </returns>
-    public static (string Source, IReadOnlyDictionary<string, string> UniformBindings) Process(
-        string entryFile, string moduleDir, string rootDir)
+    public static PreprocessResult Process(string entryFile, string moduleDir, string rootDir)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var bindings = new Dictionary<string, string>();
-        var source = ExpandIncludes(entryFile, moduleDir, rootDir, seen, 0, bindings);
-        return (source, bindings);
+        var properties = new List<PropertyDeclaration>();
+        var feeds = new List<FeedBinding>();
+        var source = ExpandIncludes(entryFile, moduleDir, rootDir, seen, 0, bindings, properties, feeds);
+        return new PreprocessResult(source, bindings, properties, feeds, seen);
     }
 
     private static string ExpandIncludes(string file, string moduleDir, string rootDir, HashSet<string> seen,
-        int depth, Dictionary<string, string> bindings)
+        int depth, Dictionary<string, string> bindings, List<PropertyDeclaration> properties,
+        List<FeedBinding> feeds)
     {
         if (depth > 32) throw new InvalidOperationException($"#include recursion too deep starting at {file}");
         var full = Path.GetFullPath(file);
@@ -95,21 +151,41 @@ public static class GlavaPreprocessor
             var rel = m.Groups[2].Value;
             var baseDir = kind == "@" ? moduleDir : rootDir;
             var resolved = Path.Combine(baseDir, rel);
-            if (File.Exists(resolved)) return ExpandIncludes(resolved, moduleDir, rootDir, seen, depth + 1, bindings);
+            if (File.Exists(resolved))
+                return ExpandIncludes(resolved, moduleDir, rootDir, seen, depth + 1, bindings, properties, feeds);
             // fall back to the other base, GLava is lenient about this
             var alt = Path.Combine(kind == "@" ? rootDir : moduleDir, rel);
             if (File.Exists(alt)) resolved = alt;
-            return ExpandIncludes(resolved, moduleDir, rootDir, seen, depth + 1, bindings);
+            return ExpandIncludes(resolved, moduleDir, rootDir, seen, depth + 1, bindings, properties, feeds);
         });
 
-        return ProcessLeaf(text, bindings);
+        return ProcessLeaf(text, bindings, properties, feeds);
     }
 
     /// <summary>Strips/rewrites directives that don't map onto plain GLSL.</summary>
-    private static string ProcessLeaf(string text, Dictionary<string, string> bindings)
+    private static string ProcessLeaf(string text, Dictionary<string, string> bindings,
+        List<PropertyDeclaration> properties, List<FeedBinding> feeds)
     {
         foreach (Match m in RequestUniform.Matches(text))
             bindings[m.Groups[1].Value] = m.Groups[2].Value;
+
+        foreach (Match m in RequestProperty.Matches(text))
+        {
+            var name = m.Groups[1].Value;
+            var type = m.Groups[2].Value;
+            // Malformed numeric literals are a shader-authoring bug, not a
+            // runtime condition -- fail loudly at load time rather than
+            // silently registering a garbage 0/0/0 property.
+            if (!float.TryParse(m.Groups[3].Value, out var def) ||
+                !float.TryParse(m.Groups[4].Value, out var min) ||
+                !float.TryParse(m.Groups[5].Value, out var max))
+                throw new InvalidOperationException(
+                    $"Malformed #request property \"{name}\" -- default/min/max must be numeric: {m.Value.Trim()}");
+            properties.Add(new PropertyDeclaration(name, type, def, min, max));
+        }
+
+        foreach (Match m in RequestFeed.Matches(text))
+            feeds.Add(new FeedBinding(m.Groups[1].Value, m.Groups[2].Value));
 
         text = RequestSetSmoothFactor.Replace(text, m => $"#define _SMOOTH_FACTOR {m.Groups[1].Value}");
         text = RequestSetSmoothPass.Replace(text,

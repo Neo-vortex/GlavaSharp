@@ -79,6 +79,33 @@ using GLFWBind = OpenTK.Windowing.GraphicsLibraryFramework.GLFW;
 //                           turns on the per-second FPS line and the
 //                           per-shader-pass compile chatter that's
 //                           otherwise silent.
+// --no-hot-reload             disable shader hot-reload -- by default,
+//                           saving a change to any .frag/.glsl file the
+//                           active module actually pulled in (via
+//                           #include, transitively) recompiles just the
+//                           affected pass(es) in place. A failed recompile
+//                           logs an error and keeps the previous, still-
+//                           working pass running rather than crashing.
+// --no-control                disable the live control channel entirely
+//                           (see --control-bind/--control-port below).
+// --control-bind <host>      live control channel bind host. Defaults to
+//                           127.0.0.1 (loopback only, no auth needed). Set
+//                           to e.g. 0.0.0.0 for LAN access (a phone/tablet
+//                           on the same network) -- there's no
+//                           authentication, so only widen this on a
+//                           network you trust; anyone who can reach
+//                           host:port can change any registered property.
+// --control-port <n>         live control channel port. Default 8642.
+//                           Running multiple GlavaSharp instances at once
+//                           needs a distinct port per instance -- a bind
+//                           failure (e.g. the port's already taken) just
+//                           disables the control channel for that
+//                           instance with a logged warning, it isn't fatal.
+//                           Open http://<host>:<port>/ in a browser: every
+//                           registered property (the fft.attack/decay/gain
+//                           globals, plus whatever the active module
+//                           declared via #request property) shows up as a
+//                           slider there, live.
 // --benchmark-fft             time IFft.Process() across a few window sizes
 //                           and exit -- no window, no visualization, just a
 //                           ms/call, calls/sec, checksum table on stdout.
@@ -91,8 +118,8 @@ using GLFWBind = OpenTK.Windowing.GraphicsLibraryFramework.GLFW;
 //                           compute workgroup limit rather than risk it. For
 //                           CpuFft, compare against the scalar fallback on
 //                           the same hardware with DOTNET_EnableAVX2=0 in
-//                           the environment (see TECHNICAL.md's Benchmarks
-//                           section for reference numbers).
+//                           the environment (see the docs site's Benchmarks
+//                           page for reference numbers).
 
 var logLevelArg = GetArgValue(args, "--log-level") ?? "info";
 switch (logLevelArg.Trim().ToLowerInvariant())
@@ -428,7 +455,11 @@ var options = new WindowOptions
     DesktopY = desktopY,
     DesktopWidth = desktopWidth,
     DesktopHeight = desktopHeight,
-    DesktopMonitorIndex = desktopMonitorIndex
+    DesktopMonitorIndex = desktopMonitorIndex,
+    ControlEnabled = !args.Contains("--no-control"),
+    ControlBindHost = GetArgValue(args, "--control-bind") ?? "127.0.0.1",
+    ControlPort = GetArgIntValue(args, "--control-port") ?? 8642,
+    HotReloadEnabled = !args.Contains("--no-hot-reload")
 };
 
 using var window = new AppWindow(options, audio, shaderRootDir, moduleName, fftSettings);
@@ -511,7 +542,7 @@ static unsafe void RunFftBenchmark(FftSettings baseSettings)
         // rather than attempted, since a compute shader that violates this
         // limit is exactly the class of misconfiguration that's hung
         // glCompileShader/glLinkProgram with no error on some driver paths
-        // (see the GpuFft bring-up notes in TECHNICAL.md) rather than
+        // (see the GpuFft bring-up notes on the docs site) rather than
         // failing cleanly.
         maxWorkGroupInvocations = GL.GetInteger(GetPName.MaxComputeWorkGroupInvocations);
         Log.Debug($"GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS = {maxWorkGroupInvocations}");
@@ -578,6 +609,49 @@ static unsafe void RunFftBenchmark(FftSettings baseSettings)
                 foreach (var v in result.right) checksum += v;
 
                 Log.Info($"{size,-6} {msPerCall,-9:F4} {callsPerSec,-10:F0} {checksum:F6}");
+
+                // ProcessToTexture is a second code path (see IFft.ProcessToTexture)
+                // that has to land on the same numbers as Process() above --
+                // GpuFft does bucketing/gravity on the GPU via
+                // shaders/fft/post.comp instead of the CPU there, so this is
+                // the only thing that actually exercises/validates that
+                // kernel. GPU-only: it's the only device with a live GL
+                // context here (see the `device == FftDevice.Gpu` check
+                // above), and CpuFft's ProcessToTexture is just Process()
+                // followed by an upload, nothing new to cross-check. Read
+                // the textures back purely for this checksum; the whole
+                // point of ProcessToTexture is that real callers never do
+                // that.
+                //
+                // ProcessToTexture keeps its own gravity state (the GPU-side
+                // SSBO in GpuFft, separate from the CPU _smoothL/_smoothR
+                // Process() just converged above over warmupIters+timedIters
+                // calls) -- it needs the same warmup on the same constant
+                // input before comparing, or this "mismatch" is just two
+                // different points on the same attack/decay convergence
+                // curve, not an actual bug.
+                if (device == FftDevice.Gpu)
+                {
+                    using var texL = new AudioSpectrumTexture(fft.Bins);
+                    using var texR = new AudioSpectrumTexture(fft.Bins);
+                    for (var i = 0; i < warmupIters + timedIters; i++) fft.ProcessToTexture(samples, texL, texR);
+                    var texChecksum = 0.0;
+                    foreach (var tex in new[] { texL, texR })
+                    {
+                        var buf = new float[tex.Size];
+                        GL.BindTexture(TextureTarget.Texture1D, tex.Handle);
+                        GL.GetTexImage(TextureTarget.Texture1D, 0, PixelFormat.Red, PixelType.Float, buf);
+                        GL.BindTexture(TextureTarget.Texture1D, 0);
+                        foreach (var v in buf) texChecksum += v;
+                    }
+
+                    var delta = Math.Abs(texChecksum - checksum);
+                    if (delta > 0.01)
+                        Log.Error(
+                            $"{size,-6} ProcessToTexture checksum mismatch: {texChecksum:F6} vs Process() {checksum:F6} (delta {delta:F6})");
+                    else
+                        Log.Debug($"{size,-6} ProcessToTexture checksum OK: {texChecksum:F6} (delta {delta:F6})");
+                }
             }
             finally
             {
