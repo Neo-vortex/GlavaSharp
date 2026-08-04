@@ -54,6 +54,12 @@ breakdown.
 
 - **New to GlavaSharp?** Start with [Building](getting-started/building.md)
   and [Running](getting-started/running.md).
+- **Want to write your own module?** See
+  [Writing a Module](guides/writing-a-module.md).
+- **Looking for a specific flag?** See the
+  [CLI Reference](guides/cli-reference.md).
+- **Trying to do something specific?** See
+  [Common Scenarios](guides/scenarios.md) for task-oriented recipes.
 - **Curious how it works?** Start with the
   [Architecture overview](architecture/overview.md).
 - **Wondering what's solid vs. shaky?** See

@@ -57,6 +57,10 @@ nav:
       - Building: getting-started/building.md
       - Running: getting-started/running.md
       - Packaging: getting-started/packaging.md
+  - Guides:
+      - Writing a Module: guides/writing-a-module.md
+      - CLI Reference: guides/cli-reference.md
+      - Common Scenarios: guides/scenarios.md
   - Architecture:
       - Overview: architecture/overview.md
       - Audio Capture: architecture/audio-capture.md
